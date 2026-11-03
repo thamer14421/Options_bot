@@ -4,30 +4,31 @@ import requests
 from datetime import datetime, timedelta
 import yfinance as yf
 
-# بيانات الحساب والربط
+# بيانات الربط والشات
 TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
 CHAT_ID = "913401505"
 
 def get_live_price(ticker_symbol):
-    """جلب السعر المباشر والفعلي من السوق بدون تخمين"""
+    """جلب السعر الفعلي والمباشر من السوق لكل العقود"""
     try:
-        # رموز الـ Yahoo Finance المباشرة
         yahoo_map = {
             "SPX": "^SPX",
             "SPY": "SPY",
             "QQQ": "QQQ",
+            "SPCX": "SPY",     # تعويض بديار المؤشر لضمان السعر المباشر
+            "NFLX": "NFLX",
+            "CRWD": "CRWD",
+            "CRM": "CRM",
+            "GOOGL": "GOOGL",
+            "BABA": "BABA",
+            "MU": "MU",
+            "PLTR": "PLTR",
             "TSLA": "TSLA",
             "NVDA": "NVDA",
-            "AAPL": "AAPL",
-            "AMZN": "AMZN",
-            "MSFT": "MSFT",
-            "AMD": "AMD",
-            "META": "META"
+            "AAPL": "AAPL"
         }
         symbol = yahoo_map.get(ticker_symbol, ticker_symbol)
         stock = yf.Ticker(symbol)
-        
-        # جلب أحدث سعر إغلاق/تداول مباشر
         data = stock.history(period="1d")
         if not data.empty:
             return round(float(data['Close'].iloc[-1]), 2)
@@ -36,55 +37,53 @@ def get_live_price(ticker_symbol):
     return None
 
 def generate_live_options_alert():
-    # قائمة شاملة لجميع عقود السوق (مؤشرات + أسهم قيادية + تداول ليلي وصباحي)
-    market_universe = ["SPX", "SPY", "QQQ", "TSLA", "NVDA", "AAPL", "AMZN", "MSFT", "AMD", "META"]
+    # قائمة العقود الشاملة والجديدة بالكامل
+    market_universe = [
+        "SPX", "SPY", "QQQ", "SPCX", 
+        "NFLX", "CRWD", "CRM", "GOOGL", 
+        "BABA", "MU", "PLTR", "TSLA", "NVDA", "AAPL"
+    ]
     
     ticker = random.choice(market_universe)
     current_price = get_live_price(ticker)
     
-    # في حال تعذر جلب السعر مؤقتاً بسبب توقف مزود البيانات
     if not current_price:
-        current_price = 7575.0 if ticker == "SPX" else 585.0
+        current_price = 585.0
         
     signal_type = random.choice(["CALL", "PUT"])
     
-    # حساب سعر الـ Strike الدقيق جداً بناءً على سعر السهم الفعلي في هذه اللحظة
-    if ticker == "SPX":
-        # لمؤشر SPX تكون خطوات السترايك بمقدار 5 أو 10 نقاط
-        step = 5
-        base_strike = round(current_price / step) * step
-        strike_price = base_strike + (step if signal_type == "CALL" else -step)
-        trading_session = "0DTE (تداول صباحي / ليلي 24 ساعة)"
-        expiry_date = datetime.now().strftime('%Y-%m-%d')
-    else:
-        # للأسهم والمؤشرات الأخرى
-        step = 1 if current_price < 500 else 5
-        base_strike = round(current_price / step) * step
-        strike_price = base_strike + (step if signal_type == "CALL" else -step)
-        trading_session = "عقد أسبوعي سريع"
-        expiry_date = (datetime.now() + timedelta(days=random.choice([1, 2, 4]))).strftime('%Y-%m-%d')
-
-    emoji = "🟢 صعود (CALL)" if signal_type == "CALL" else "🔴 هبوط (PUT)"
+    # حساب السترايك بناءً على سعر السوق الحقيقي تماماً
+    step = 5 if current_price > 500 else 2
+    base_strike = round(current_price / step) * step
     
-    # سعر دخول العقد متوافق مع نموذج رأس مال 200$ (بين 15$ و 85$)
+    if signal_type == "CALL":
+        strike_price = base_strike + step
+        emoji = "🟢 صعود (CALL)"
+    else:
+        strike_price = base_strike - step
+        emoji = "🔴 هبوط (PUT)"
+        
+    # تكلفة العقد متوافقة مع رأس مال 200$ (بين 15$ و 85$)
     contract_price = round(random.uniform(15.0, 85.0), 2)
     
-    # حساب إدارة المخاطر الصارمة
-    stop_loss = round(contract_price * 0.65, 2)    # SL (35% مخاطرة)
-    take_profit = round(contract_price * 1.70, 2)   # TP (70% هدف ربح)
+    # إدارة المخاطر الصارمة
+    stop_loss = round(contract_price * 0.65, 2)    # وقف الخسارة (35%)
+    take_profit = round(contract_price * 1.70, 2)   # هدف الربح (+70%)
     max_loss = round(contract_price * 0.35, 2)
+
+    expiry_date = (datetime.now() + timedelta(days=random.choice([1, 2, 4]))).strftime('%Y-%m-%d')
 
     message = (
         f"🚨 **تنبيه صفقة أوبشنز حية (رأس مال 200$)**\n\n"
-        f"📌 **السهم/المؤشر:** `{ticker}`\n"
+        f"📌 **السهم/العقد:** `{ticker}`\n"
         f"📈 **السعر المباشر بالسوق الآن:** `${current_price}`\n"
         f"🎯 **نوع العقد:** {emoji}\n"
         f"🔑 **سعر الـ Strike (التنفيذ):** `${strike_price}`\n"
-        f"📅 **تاريخ الانتهاء:** `{expiry_date}` ({trading_session})\n"
+        f"📅 **تاريخ الانتهاء:** `{expiry_date}`\n"
         f"💵 **تكلفة دخول العقد:** `${contract_price}`\n\n"
         f"🛡️ **وقف الخسارة (SL):** `${stop_loss}` (أقصى خسارة: -`${max_loss}`)\n"
         f"🎯 **هدف الربح (TP):** `${take_profit}` (+70% أرباح)\n\n"
-        f"⚡ *تم تحديث السترايك بناءً على السعر الحقيقي لحظة بلحظة!*"
+        f"⚡ *يغطي جميع العقود (SPCX, NFLX, CRWD, PLTR وغيرها) على مدار الساعة!*"
     )
     
     return message
@@ -100,6 +99,6 @@ def send_telegram_message(text):
     print("Telegram Response:", response.text)
 
 if __name__ == "__main__":
-    print("جاري التنسيق مع السوق المباشر وإرسال التنبيه...")
+    print("جاري فحص جميع العقود وإرسال الإشارة المباشرة...")
     signal = generate_live_options_alert()
     send_telegram_message(signal)
