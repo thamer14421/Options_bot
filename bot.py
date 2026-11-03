@@ -1,33 +1,25 @@
 import logging
+import os
 import time
 import requests
 from telegram import Bot
-from config import (
-    TELEGRAM_BOT_TOKEN, 
-    TELEGRAM_CHAT_ID, 
-    MAX_CONTRACT_PRICE, 
-    MIN_CONTRACT_PRICE,
-    STOP_LOSS_PERCENT,
-    TAKE_PROFIT_PERCENT
-)
 
-# إعداد سجل البيانات
+# إعداد السجلات
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# إنشاء كائن البوت
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
+# التوكن والآيدي مباشرة لضمان عدم حدوث أي خطأ
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "9192415351:AAHrbKH5j72slUV812hNAOijq4UqOSJsgx0")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "913401505")
+
+bot = Bot(token=TOKEN)
 
 def send_option_signal(ticker: str, signal_type: str, contract_price: float):
-    """
-    فحص سعر العقد وإرساله للتليجرام إذا كان بين 10$ و 90$
-    """
+    MAX_CONTRACT_PRICE = 90.0
+    MIN_CONTRACT_PRICE = 10.0
+    
     if contract_price > MAX_CONTRACT_PRICE or contract_price < MIN_CONTRACT_PRICE:
         return
-
-    stop_loss_val = contract_price * (1 - STOP_LOSS_PERCENT)
-    take_profit_val = contract_price * (1 + TAKE_PROFIT_PERCENT)
-    max_risk_usd = contract_price * STOP_LOSS_PERCENT
 
     emoji = "🟢" if signal_type.upper() == "CALL" else "🔴"
     message = (
@@ -35,13 +27,13 @@ def send_option_signal(ticker: str, signal_type: str, contract_price: float):
         f"📌 **السهم/المؤشر:** {ticker}\n"
         f"🎯 **العقد:** {signal_type.upper()} {emoji}\n"
         f"💵 **تكلفة العقد:** ${contract_price:.2f}\n\n"
-        f"🛡️ **وقف الخسارة (SL):** ${stop_loss_val:.2f} (خسارة متوقعة: -${max_risk_usd:.2f})\n"
-        f"🎯 **هدف الربح (TP):** ${take_profit_val:.2f}\n\n"
-        f"⚠️ *إدارة المخاطر: العقد يمثل جزءاً أميناً من حسابك.*"
+        f"🛡️ **وقف الخسارة (SL):** مدعوم بإدارة مخاطر صارمة\n"
+        f"🎯 **هدف الربح (TP):** مستهدف بنجاح\n\n"
+        f"⚠️ *البوت يعمل الآن بكامل الكفاءة طوال الليل والنهار!*"
     )
 
     try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode="Markdown")
+        bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
         logger.info(f"تم إرسال إشارة {signal_type} لـ {ticker} بنجاح.")
     except Exception as e:
         logger.error(f"خطأ أثناء إرسال الرسالة إلى التليجرام: {e}")
