@@ -1,13 +1,9 @@
 import os
+import time
 import requests
-import threading
 from datetime import datetime, timedelta
-from flask import Flask, request
-
-app = Flask(__name__)
 
 TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
-CHAT_ID = "913401505"
 
 def get_stock_data_and_analysis(ticker):
     """جلب بيانات السهم وتحليله فنياً عبر مؤشرات حقيقية (RSI & Moving Averages)"""
@@ -112,22 +108,23 @@ def generate_confirmed_signal(ticker_name):
         stop_loss = round(price * 1.01, 2)
 
     message = (
-        f"🎯 **تأكيد تحليل فني لسهم ({ticker})**\n"
+        f"🎯 **تحليل فني معتمد (Options Alert)**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
+        f"🏷️ **الرمز:** `{ticker}`\n"
         f"💰 **السعر اللحظي:** `${price}`\n"
-        f"📊 **مؤشر RSI:** `{analysis['rsi']}`\n"
-        f"🔍 **التأكيد الفني:** {analysis['sentiment']}\n"
-        f"💡 **سبب الإشارة:** {analysis['reason']}\n"
+        f"📊 **مؤشر القوة RSI:** `{analysis['rsi']}`\n"
+        f"🔍 **حالة الاتجاه:** {analysis['sentiment']}\n"
+        f"💡 **المعيار الفني:** {analysis['reason']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🚀 **توصية العقد التأكيدية:** {emoji}\n"
-        f"📌 **السترايك المناسب:** `${strike_price}`\n"
-        f"📅 **تاريخ الانتهاء الأكيد:** `{expiry_date}`\n"
+        f"🚀 **توصية العقد:** {emoji}\n"
+        f"📌 **السترايك المقترح:** `${strike_price}`\n"
+        f"📅 **تاريخ الانتهاء:** `{expiry_date}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 **الهدف الأول:** `${target_1}`\n"
         f"🚀 **الهدف الثاني:** `${target_2}`\n"
         f"🛡️ **وقف الخسارة:** `${stop_loss}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ *تحليل فني مؤكد بناءً على المؤشرات اللحظية!*"
+        f"⚡ *نظام التداول الذكي - جاهز للعمل بنجاح!*"
     )
     return message
 
@@ -140,29 +137,35 @@ def send_telegram_message(text, target_chat_id):
     }
     requests.post(url, json=payload)
 
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    """استقبال الرسائل عبر مسارات متعددة لضمان عدم ضياع أي سهم مهما كان السرعة"""
-    json_data = request.get_json()
-    if json_data and "message" in json_data:
-        message = json_data["message"]
-        if "text" in message:
-            user_text = message["text"].strip()
-            user_chat_id = message["chat"]["id"]
+def run_polling():
+    """نظام الاستطلاع المباشر والمستقر (Polling)"""
+    print("Bot started polling successfully...")
+    offset = 0
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=30"
+            response = requests.get(url, timeout=35).json()
             
-            if not user_text.startswith("/"):
-                def process_request():
-                    reply = generate_confirmed_signal(user_text)
-                    send_telegram_message(reply, target_chat_id=user_chat_id)
-                
-                threading.Thread(target=process_request).start()
-                
-    return "OK", 200
-
-@app.route('/')
-def home():
-    return "Webhook Options Bot is Active & Running 24/7!"
+            if "result" in response:
+                for update in response["result"]:
+                    offset = update["update_id"] + 1
+                    if "message" in update and "text" in update["message"]:
+                        user_text = update["message"]["text"].strip()
+                        chat_id = update["message"]["chat"]["id"]
+                        
+                        if user_text.startswith("/start"):
+                            welcome_msg = (
+                                "👋 **أهلاً بك في بوت تحليل صفقات الأوبشن الذكي!**\n\n"
+                                "قم بإرسال رمز أي سهم (مثل: `TSLA`, `NVDA`, `SPY`) وسيقوم البوت بتحليله فنياً فوراً وإعطائك أهداف السترايك وتاريخ الانتهاء بدقة. 🚀"
+                            )
+                            send_telegram_message(welcome_msg, chat_id)
+                        elif not user_text.startswith("/"):
+                            reply = generate_confirmed_signal(user_text)
+                            send_telegram_message(reply, chat_id)
+        except Exception as e:
+            print(f"Polling error: {e}")
+            time.sleep(3)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    # تشغيل حلقة الاستطلاع مباشرة
+    run_polling()
