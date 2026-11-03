@@ -1,9 +1,7 @@
 import os
 import requests
-import threading
-import time
 from datetime import datetime, timedelta
-from flask import Flask
+from flask import Flask, request
 
 app = Flask(__name__)
 
@@ -19,7 +17,6 @@ def get_stock_data_and_analysis(ticker):
         
         result = response['chart']['result'][0]
         prices = result['indicators']['quote'][0]['close']
-        # تنظيف البيانات من القيم الفارغة
         prices = [p for p in prices if p is not None]
         
         if len(prices) < 14:
@@ -27,7 +24,7 @@ def get_stock_data_and_analysis(ticker):
         
         current_price = round(prices[-1], 2)
         
-        # حساب مؤشر RSI بسيط (14 فترة)
+        # حساب مؤشر RSI (14 فترة)
         gains = []
         losses = []
         for i in range(1, 15):
@@ -51,7 +48,6 @@ def get_stock_data_and_analysis(ticker):
         # حساب متوسط الحركة SMA (20 فترة)
         sma_20 = sum(prices[-20:]) / min(len(prices), 20)
         
-        # اتخاذ القرار بناءً على التحليل الفني المؤكد
         if current_price > sma_20 and rsi < 65:
             signal_type = "CALL"
             sentiment = "تأكيد إيجابي (صاعد) 📈"
@@ -61,7 +57,6 @@ def get_stock_data_and_analysis(ticker):
             sentiment = "تأكيد سلبي (هابط) 📉"
             reason = f"السهم يتداول تحت المتوسط و RSI مرتفع ({rsi})"
         else:
-            # حالة حيادية مع ميل حسب الاتجاه اللحظي
             if current_price >= sma_20:
                 signal_type = "CALL"
                 sentiment = "اتجاه صاعد مع حذر 📊"
@@ -135,7 +130,7 @@ def generate_confirmed_signal(ticker_name):
     )
     return message
 
-def send_telegram_message(text, target_chat_id=CHAT_ID):
+def send_telegram_message(text, target_chat_id):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {
         "chat_id": target_chat_id,
@@ -144,35 +139,25 @@ def send_telegram_message(text, target_chat_id=CHAT_ID):
     }
     requests.post(url, json=payload)
 
-def start_telegram_bot():
-    offset = 0
-    print("البوت المؤكد بدأ العمل...")
-    while True:
-        try:
-            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=10"
-            res = requests.get(url, timeout=15).json()
-            if "result" in res:
-                for update in res["result"]:
-                    offset = update["update_id"] + 1
-                    if "message" in update and "text" in update["message"]:
-                        user_text = update["message"]["text"].strip()
-                        user_chat_id = update["message"]["chat"]["id"]
-                        
-                        if not user_text.startswith("/"):
-                            reply = generate_confirmed_signal(user_text)
-                            send_telegram_message(reply, target_chat_id=user_chat_id)
-        except Exception as e:
-            print(f"Error in polling: {e}")
-            time.sleep(3)
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    """استقبال الرسائل فوراً عبر نظام Webhook من تليجرام"""
+    json_data = request.get_json()
+    if json_data and "message" in json_data:
+        message = json_data["message"]
+        if "text" in message:
+            user_text = message["text"].strip()
+            user_chat_id = message["chat"]["id"]
+            
+            if not user_text.startswith("/"):
+                reply = generate_confirmed_signal(user_text)
+                send_telegram_message(reply, target_chat_id=user_chat_id)
+    return "OK", 200
 
 @app.route('/')
 def home():
-    return "Confirmed Options Bot is Running!"
+    return "Webhook Options Bot is Active & Running 24/7!"
 
 if __name__ == "__main__":
-    t = threading.Thread(target=start_telegram_bot)
-    t.daemon = True
-    t.start()
-    
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
