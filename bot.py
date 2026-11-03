@@ -4,13 +4,13 @@ import time
 import requests
 from telegram import Bot
 
-# إعداد السجلات
+# Panangisagana kadagiti Rekord
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# التوكن والآيدي مباشرة لضمان عدم حدوث أي خطأ
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "9192415351:AAHrbKH5j72slUV812hNAOijq4UqOSJsgx0")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "913401505")
+# Baro a Token ken Chat ID
+TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
+CHAT_ID = "913401505"
 
 bot = Bot(token=TOKEN)
 
