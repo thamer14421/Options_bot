@@ -1,13 +1,16 @@
 import os
 import random
 import requests
+import threading
+import time
 from datetime import datetime, timedelta
+from flask import Flask
 
-# بيانات التوكن والآيدي الخاصة بك
+app = Flask(__name__)
+
 TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
 CHAT_ID = "913401505"
 
-# قائمة العقود المعتمدة
 UNIVERSE_CONTRACTS = [
     "SPX (المؤشر العام - ليلي/صباحي 24 ساعة)",
     "SPY (صندوق المؤشر)",
@@ -26,51 +29,30 @@ UNIVERSE_CONTRACTS = [
 ]
 
 def get_next_valid_expiry():
-    """حساب تاريخ انتهاء أكيد ومضمون ليوم تداول مفتوح"""
     target_date = datetime.now() + timedelta(days=3)
-    if target_date.weekday() == 5: # السبت -> نخليه الإثنين
+    if target_date.weekday() == 5:
         target_date += timedelta(days=2)
-    elif target_date.weekday() == 6: # الأحد -> نخليه الإثنين
+    elif target_date.weekday() == 6:
         target_date += timedelta(days=1)
     return target_date.strftime('%Y-%m-%d')
 
-def generate_signal_for_ticker(ticker_name):
-    """توليد توصية تفاعلية لسهم محدد يطلبه المستخدم"""
+def generate_signal(ticker_name):
     signal_type = random.choice(["CALL", "PUT"])
     emoji = "🟢 **شراء صعود (CALL)**" if signal_type == "CALL" else "🔴 **شراء هبوط (PUT)**"
     expiry_date = get_next_valid_expiry()
 
     message = (
-        f"🎯 **تحليل وتوصية خاصة بناءً على طلبك**\n"
+        f"🎯 **تحليل وعقد خاص لـ ({ticker_name.upper()})**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 **السهم/العقد المطلوبة:** `{ticker_name.upper()}`\n"
-        f"🎯 **الاتجاه المتوقع:** {emoji}\n"
-        f"📅 **تاريخ الانتهاء الأكيد:** `{expiry_date}`\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *تم التحليل بناءً على حركة السهم الحالية*"
-    )
-    return message
-
-def generate_hourly_clean_signal():
-    """توليد التنبيه الدائري التلقائي كل ساعة"""
-    ticker = random.choice(UNIVERSE_CONTRACTS)
-    signal_type = random.choice(["CALL", "PUT"])
-    emoji = "🟢 **شراء صعود (CALL)**" if signal_type == "CALL" else "🔴 **شراء هبوط (PUT)**"
-    expiry_date = get_next_valid_expiry()
-
-    message = (
-        f"📊 **تنبيه صفقة أوبشنز آلي (دوري كل ساعة)**\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 **اسم العقد/الأصل:** `{ticker}`\n"
+        f"📌 **اسم العقد/الأصل:** `{ticker_name.upper()}`\n"
         f"🎯 **نوع العقد:** {emoji}\n"
         f"📅 **تاريخ الانتهاء الأكيد:** `{expiry_date}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ *يعمل آلياً 24/7 دون توقف*"
+        f"⚡ *تم الرد فورياً بناءً على طلبك!*"
     )
     return message
 
 def send_telegram_message(text, target_chat_id=CHAT_ID):
-    """إرسال رسالة عبر التليجرام"""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {
         "chat_id": target_chat_id,
@@ -79,28 +61,38 @@ def send_telegram_message(text, target_chat_id=CHAT_ID):
     }
     requests.post(url, json=payload)
 
-def process_incoming_messages():
-    """التحقق مما إذا كان المستخدم أرسل رسالة للبوت (مثل كتابة اسم سهم) والرد عليه فوراً"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-        res = requests.get(url).json()
-        if "result" in res and len(res["result"]) > 0:
-            last_update = res["result"][-1]
-            if "message" in last_update and "text" in last_update["message"]:
-                user_text = last_update["message"]["text"].strip()
-                user_chat_id = last_update["message"]["chat"]["id"]
-                
-                # إذا كانت الرسالة ليست أمراً بالبدء (/start)
-                if not user_text.startswith("/"):
-                    reply = generate_signal_for_ticker(user_text)
-                    send_telegram_message(reply, target_chat_id=user_chat_id)
-    except Exception as e:
-        print(f"Error checking updates: {e}")
+def start_telegram_bot():
+    """حلقة الاستماع الفوري للرسائل في الخلفية"""
+    offset = 0
+    print("البوت بدأ الاستماع للرسائل...")
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=10"
+            res = requests.get(url, timeout=15).json()
+            if "result" in res:
+                for update in res["result"]:
+                    offset = update["update_id"] + 1
+                    if "message" in update and "text" in update["message"]:
+                        user_text = update["message"]["text"].strip()
+                        user_chat_id = update["message"]["chat"]["id"]
+                        
+                        if not user_text.startswith("/"):
+                            reply = generate_signal(user_text)
+                            send_telegram_message(reply, target_chat_id=user_chat_id)
+        except Exception as e:
+            print(f"Error in polling: {e}")
+            time.sleep(3)
+
+@app.route('/')
+def home():
+    return "Bot is running 24/7!"
 
 if __name__ == "__main__":
-    # 1. إرسال الصفقة التلقائية كل ساعة
-    hourly_msg = generate_hourly_clean_signal()
-    send_telegram_message(hourly_msg)
+    # تشغيل بوت التيليجرام في خيط (Thread) منفصل
+    t = threading.Thread(target=start_telegram_bot)
+    t.daemon = True
+    t.start()
     
-    # 2. فحص الرسائل الخاصة بك إذا كنت كتبت اسم سهم والرد عليك
-    process_incoming_messages()
+    # تشغيل سيرفر الويب الخاص بـ Render
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
