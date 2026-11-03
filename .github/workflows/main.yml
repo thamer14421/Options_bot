@@ -2,16 +2,15 @@ name: Run 24/7 Options Bot
 
 on:
   schedule:
-    # هذا الجدول يجعل البوت يعمل تلقائياً كل ساعة على مدار 24 ساعة طوال أيام الأسبوع
-    - cron: '0 * * * *'
-  workflow_dispatch:
+    - cron: '0 * * * *'  # يعمل تلقائياً كل ساعة
+  workflow_dispatch:      # يسمح بالتشغيل اليدوي متى ما بغيت
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-      - uses: actions/checkout@v3
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
