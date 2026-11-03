@@ -3,12 +3,10 @@ import random
 import requests
 from datetime import datetime, timedelta
 
-# بيانات الربط الرسمية
 TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
 CHAT_ID = "913401505"
 
 def get_next_valid_expiry():
-    """حساب تاريخ انتهاء حقيقي ومضمون ليوم تداول نشط (تجنب الإجازات)"""
     target_date = datetime.now() + timedelta(days=3)
     if target_date.weekday() == 5: # السبت
         target_date += timedelta(days=2)
@@ -17,7 +15,6 @@ def get_next_valid_expiry():
     return target_date.strftime('%Y-%m-%d')
 
 def generate_clean_signal():
-    # جميع العقود المعروفة وغير المعروفة
     universe_contracts = [
         "SPX (المؤشر العام - ليلي/صباحي 24 ساعة)",
         "SPY (صندوق المؤشر)",
@@ -52,7 +49,7 @@ def generate_clean_signal():
         f"🎯 **نوع العقد:** {emoji}\n"
         f"📅 **تاريخ الانتهاء الأكيد:** `{expiry_date}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ *البوت يعمل آلياً وبشكل مستمر للأبد*"
+        f"⚡ *البوت يعمل آلياً وبشكل مستمر على مدار الساعة*"
     )
     
     return message
