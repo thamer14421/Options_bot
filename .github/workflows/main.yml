@@ -1,25 +1,3 @@
-name: Run 24/7 Options Bot
-
-on:
-  schedule:
-    - cron: '0 * * * *'  # يعمل تلقائياً كل ساعة
-  workflow_dispatch:      # يسمح بالتشغيل اليدوي متى ما بغيت
-
-jobs:
-  run-bot:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
-        run: |
-          pip install requests
-
-      - name: Run Bot Script
-        run: python bot.py
+- name: Install dependencies
+  run: |
+    pip install requests flask
