@@ -8,7 +8,6 @@ app = Flask(__name__)
 TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
 
 def get_stock_data_and_analysis(ticker):
-    """جلب وتحليل البيانات بناءً على النسخة القديمة مع دعم الأسباب الاستراتيجية"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker.upper()}?interval=15m&range=5d"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -23,7 +22,6 @@ def get_stock_data_and_analysis(ticker):
         
         current_price = round(prices[-1], 2)
         
-        # حساب RSI (14)
         gains, losses = [], []
         for i in range(1, 15):
             change = prices[-i] - prices[-(i+1)]
@@ -43,27 +41,16 @@ def get_stock_data_and_analysis(ticker):
             rs = avg_gain / avg_loss
             rsi = round(100 - (100 / (1 + rs)), 1)
             
-        # حساب SMA (20)
         sma_20 = sum(prices[-20:]) / min(len(prices), 20)
         
-        # المنطق القديم مع تفعيل الأسباب الاستراتيجية المتقدمة
         if current_price > sma_20 and rsi < 65:
             signal_type = "CALL"
             sentiment = "تأكيد إيجابي (صاعد)"
-            reason = f"السهم يتداول فوق المتوسط و RSI دافئ ({rsi})"
-        elif current_price < sma_20 and rsi > 35:
+            reason = f"السهم يتداول تحت المتوسط و RSI مرتفع ({rsi})" if current_price < sma_20 else f"السهم يتداول فوق المتوسط و RSI دافئ ({rsi})"
+        else:
             signal_type = "PUT"
             sentiment = "تأكيد سلبي (هابط)"
             reason = f"السهم يتداول تحت المتوسط و RSI مرتفع ({rsi})"
-        else:
-            if current_price >= sma_20:
-                signal_type = "CALL"
-                sentiment = "اتجاه صاعد مع حذر"
-                reason = f"مستويات RSI عند ({rsi})"
-            else:
-                signal_type = "PUT"
-                sentiment = "اتجاه هابط مع حذر"
-                reason = f"مستويات RSI عند ({rsi})"
                 
         return {
             "price": current_price,
@@ -73,23 +60,21 @@ def get_stock_data_and_analysis(ticker):
             "rsi": rsi
         }
     except Exception as e:
-        print(f"Error analyzing {ticker}: {e}")
+        print(f"Error: {e}")
         return None
 
 def get_next_valid_expiry():
     today = datetime.now()
     days_ahead = 4 - today.weekday()
-    if days_ahead <= 0:
-        days_ahead += 7
-    target_date = today + timedelta(days=days_ahead)
-    return target_date.strftime('%Y-%m-%d')
+    if days_ahead <= 0: days_ahead += 7
+    return (today + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
 
 def generate_confirmed_signal(ticker_name):
     ticker = ticker_name.upper().strip()
     analysis = get_stock_data_and_analysis(ticker)
     
     if not analysis:
-        return f"⚠️ **تنبيه:** تعذر جلب البيانات لسهم `{ticker}`. تأكد من الرمز وحاول مجدداً."
+        return f"⚠️ **تنبيه:** تعذر جلب البيانات لسهم `{ticker}`."
 
     price = analysis["price"]
     signal_type = analysis["signal"]
@@ -108,8 +93,7 @@ def generate_confirmed_signal(ticker_name):
         target_2 = round(price * 0.97, 2)
         stop_loss = round(price * 1.01, 2)
 
-    # نفس الشكل القديم تماماً مع إضافة تفاصيل الاستراتيجية الواضحة
-    message = (
+    return (
         f"🎯 **تأكيد تحليل فني لسهم ({ticker})**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"💰 السعر اللحظي: `${price}`\n"
@@ -127,33 +111,24 @@ def generate_confirmed_signal(ticker_name):
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ تحليل فني مؤكد بناءً على المؤشرات اللحظية!"
     )
-    return message
 
-def send_telegram_message(text, target_chat_id):
+def send_telegram_message(text, chat_id):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": target_chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
-    requests.post(url, json=payload)
+    requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
     json_data = request.get_json()
     if json_data and "message" in json_data:
-        message = json_data["message"]
-        if "text" in message:
-            user_text = message["text"].strip()
-            user_chat_id = message["chat"]["id"]
-            
-            if user_text.startswith("/start"):
-                welcome_msg = "👋 أهلاً بك! أرسل رمز السهم (مثل TSLA أو SPY) للحصول على التحليل الفني."
-                send_telegram_message(welcome_msg, user_chat_id)
-            elif not user_text.startswith("/"):
-                reply = generate_confirmed_signal(user_text)
-                send_telegram_message(reply, user_chat_id)
-                
+        msg = json_data["message"]
+        if "text" in msg:
+            text = msg["text"].strip()
+            chat_id = msg["chat"]["id"]
+            if text.startswith("/start"):
+                send_telegram_message("👋 أهلاً بك! أرسل رمز السهم (مثل TSLA أو SPY) للحصول على التحليل الفني.", chat_id)
+            elif not text.startswith("/"):
+                reply = generate_confirmed_signal(text)
+                send_telegram_message(reply, chat_id)
     return "OK", 200
 
 @app.route('/')
