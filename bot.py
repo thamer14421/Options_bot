@@ -43,11 +43,11 @@ def get_stock_data_and_analysis(ticker):
         if current_price > sma_20 and rsi < 65:
             signal_type = "CALL"
             sentiment = "تأكيد إيجابي (صاعد)"
-            reason = f"السهم فوق المتوسط و RSI دافئ ({rsi})"
+            reason = f"السهم يتداول فوق المتوسط و RSI دافئ ({rsi})"
         else:
             signal_type = "PUT"
             sentiment = "تأكيد سلبي (هابط)"
-            reason = f"السهم تحت المتوسط و RSI مرتفع ({rsi})"
+            reason = f"السهم يتداول تحت المتوسط و RSI مرتفع ({rsi})"
                 
         return {
             "price": current_price, "signal": signal_type,
@@ -68,7 +68,7 @@ def generate_confirmed_signal(ticker_name):
     analysis = get_stock_data_and_analysis(ticker)
     
     if not analysis:
-        return f"⚠️ **تنبيه:** تعذر جلب البيانات لسهم `{ticker}`."
+        return f"⚠️ **تنبيه:** تعذر جلب البيانات لسهم `{ticker}`. تأكد من الرمز."
 
     price = analysis["price"]
     signal_type = analysis["signal"]
@@ -76,16 +76,16 @@ def generate_confirmed_signal(ticker_name):
 
     if signal_type == "CALL":
         emoji = "🟢 **شراء صعود (CALL)**"
-        strike = round(price * 1.01, 1)
-        t1 = round(price * 1.015, 2)
-        t2 = round(price * 1.03, 2)
-        sl = round(price * 0.99, 2)
+        strike_price = round(price * 1.01, 1)
+        target_1 = round(price * 1.015, 2)
+        target_2 = round(price * 1.03, 2)
+        stop_loss = round(price * 0.99, 2)
     else:
         emoji = "🔴 **شراء هبوط (PUT)**"
-        strike = round(price * 0.99, 1)
-        t1 = round(price * 0.985, 2)
-        t2 = round(price * 0.97, 2)
-        sl = round(price * 1.01, 2)
+        strike_price = round(price * 0.99, 1)
+        target_1 = round(price * 0.985, 2)
+        target_2 = round(price * 0.97, 2)
+        stop_loss = round(price * 1.01, 2)
 
     return (
         f"🎯 **تأكيد تحليل فني لسهم ({ticker})**\n"
@@ -96,12 +96,12 @@ def generate_confirmed_signal(ticker_name):
         f"💡 سبب الإشارة: {analysis['reason']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🚀 توصية العقد التأكيدية: {emoji}\n"
-        f"📌 السترايك المناسب: `${strike}`\n"
+        f"📌 السترايك المناسب: `${strike_price}`\n"
         f"📅 تاريخ الانتهاء الأكيد: `{expiry_date}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 الهدف الأول: `${t1}`\n"
-        f"🚀 الهدف الثاني: `${t2}`\n"
-        f"🛡️ وقف الخسارة: `${sl}`\n"
+        f"🎯 الهدف الأول: `${target_1}`\n"
+        f"🚀 الهدف الثاني: `${target_2}`\n"
+        f"🛡️ وقف الخسارة: `${stop_loss}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ تحليل فني مؤكد بناءً على المؤشرات اللحظية!"
     )
@@ -110,32 +110,24 @@ def send_telegram_message(text, chat_id):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
-def run_polling():
-    print("Bot polling started...")
+if __name__ == "__main__":
+    print("Bot is running...")
     offset = 0
-    # إلغاء أي ويب هوك قديم عالق لكي يعمل الـ Polling بنجاح تام
-    requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=True")
-    
     while True:
         try:
             url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=30"
             response = requests.get(url, timeout=35).json()
-            
             if "result" in response:
                 for update in response["result"]:
                     offset = update["update_id"] + 1
                     if "message" in update and "text" in update["message"]:
                         text = update["message"]["text"].strip()
                         chat_id = update["message"]["chat"]["id"]
-                        
                         if text.startswith("/start"):
                             send_telegram_message("👋 أهلاً بك! أرسل رمز السهم (مثل TSLA أو SPY) للحصول على التحليل الفني.", chat_id)
                         elif not text.startswith("/"):
                             reply = generate_confirmed_signal(text)
                             send_telegram_message(reply, chat_id)
         except Exception as e:
-            print(f"Polling error: {e}")
+            print(f"Error: {e}")
             time.sleep(3)
-
-if __name__ == "__main__":
-    run_polling()
