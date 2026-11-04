@@ -165,6 +165,65 @@ def _num(x, default=0.0):
         return default
 
 
+CACHE_TTL = int(_env("CACHE_TTL_SEC", "300"))
+
+
+def _with_retry(fn):
+    last = None
+    for i in range(3):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            log.warning("yahoo call failed (try %d): %s", i + 1, type(e).__name__)
+            time.sleep(1.5 * (i + 1))
+    raise last
+
+
+class CachedTicker:
+    """yfinance Ticker wrapper: caches results for CACHE_TTL seconds and retries failed calls."""
+
+    def __init__(self, sym):
+        self._t = yf.Ticker(sym)
+        self._store = {}
+
+    def _get(self, key, fn):
+        hit = self._store.get(key)
+        if hit and time.time() - hit[0] < CACHE_TTL:
+            return hit[1]
+        val = _with_retry(fn)
+        self._store[key] = (time.time(), val)
+        return val
+
+    @property
+    def options(self):
+        return self._get("options", lambda: tuple(self._t.options))
+
+    @property
+    def calendar(self):
+        return self._get("calendar", lambda: self._t.calendar)
+
+    def history(self, period="1d", interval="1d"):
+        return self._get(("h", period, interval), lambda: self._t.history(period=period, interval=interval))
+
+    def option_chain(self, exp):
+        return self._get(("c", exp), lambda: self._t.option_chain(exp))
+
+
+_tickers = {}
+_tickers_lock = threading.Lock()
+
+
+def get_ticker(sym):
+    with _tickers_lock:
+        if len(_tickers) > 60:
+            _tickers.clear()
+        ct = _tickers.get(sym)
+        if ct is None:
+            ct = _tickers[sym] = CachedTicker(sym)
+        return ct
+
+
 def calc_rsi(closes, period=14):
     deltas = closes.diff().dropna()
     gain = deltas.clip(lower=0).rolling(period).mean().iloc[-1]
@@ -181,7 +240,7 @@ def calc_rsi(closes, period=14):
 # ----------------------------------------------------------------------------
 def scan_ticker(sym):
     """Return unusual option contracts for one ticker (not deduped)."""
-    t = yf.Ticker(sym)
+    t = get_ticker(sym)
     hist = t.history(period="1d")
     if hist.empty:
         return []
@@ -254,6 +313,7 @@ def scan_all(dedupe):
             hits.extend(scan_ticker(sym))
         except Exception as e:  # noqa: BLE001
             log.warning("scan %s failed: %s", sym, type(e).__name__)
+        time.sleep(0.5)
     hits.sort(key=lambda h: h["premium"], reverse=True)
     if dedupe:
         hits = _only_new(hits)
@@ -422,7 +482,7 @@ def earnings_in_window(t, until_iso):
 
 def evaluate(sym, flow_hits=None):
     """Score a ticker and build a trade plan. Returns None when data is missing."""
-    t = yf.Ticker(sym)
+    t = get_ticker(sym)
     tech = technicals(t)
     if tech is None:
         return None
@@ -679,7 +739,7 @@ def gamma_report(raw):
     sym = raw.upper().strip().lstrip("$")
     if not re.fullmatch(r"[A-Z][A-Z.\-]{0,5}", sym):
         return "\u0627\u0643\u062a\u0628 \u0627\u0644\u0623\u0645\u0631 \u0645\u0639 \u0631\u0645\u0632 \u0627\u0644\u0633\u0647\u0645\u060c \u0645\u062b\u0644: /gamma TSLA"
-    t = yf.Ticker(sym)
+    t = get_ticker(sym)
     h = t.history(period="1d")
     if h is None or h.empty:
         return f"\u0645\u0627 \u0644\u0642\u064a\u062a \u0628\u064a\u0627\u0646\u0627\u062a \u0644\u0644\u0631\u0645\u0632 {sym}"
@@ -729,6 +789,7 @@ HELP = (
 
 
 def handle_update(update):
+    chat_id = ""
     try:
         msg = update.get("message") or {}
         chat_id = str((msg.get("chat") or {}).get("id", ""))
@@ -765,6 +826,8 @@ def handle_update(update):
             tg_send(chat_id, analyze(text))
     except Exception as e:  # noqa: BLE001
         log.error("handle_update error: %s", type(e).__name__)
+        if CHAT_ID and chat_id == CHAT_ID:
+            tg_send(chat_id, "\u26a0\ufe0f \u062a\u0639\u0630\u0651\u0631 \u062c\u0644\u0628 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0622\u0646\u060c \u063a\u0627\u0644\u0628\u0627\u064b Yahoo \u064a\u062d\u062f\u0651 \u0627\u0644\u0637\u0644\u0628\u0627\u062a. \u062c\u0631\u0628 \u0628\u0639\u062f \u062f\u0642\u064a\u0642\u0629.")
 
 
 # ----------------------------------------------------------------------------
