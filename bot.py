@@ -27,9 +27,9 @@ def get_stock_data_and_analysis(ticker):
         sma_20 = sum(prices[-20:]) / min(len(prices), 20)
         
         if current_price > sma_20 and rsi < 65:
-            signal_type, sentiment, reason = "CALL", "تأكيد إيجابي (صاعد) 📈", f"السهم يتداول فوق المتوسط و RSI دافئ ({rsi})"
+            signal_type, sentiment, reason = "CALL", "تأكيد إيجابي (صاعد) 📈", f"السهم فوق المتوسط و RSI دافئ ({rsi})"
         else:
-            signal_type, sentiment, reason = "PUT", "تأكيد سلبي (هابط) 📉", f"السهم يتداول تحت المتوسط و RSI مرتفع ({rsi})"
+            signal_type, sentiment, reason = "PUT", "تأكيد سلبي (هابط) 📉", f"السهم تحت المتوسط و RSI مرتفع ({rsi})"
         return {"price": current_price, "signal": signal_type, "sentiment": sentiment, "reason": reason, "rsi": rsi}
     except:
         return None
@@ -74,15 +74,19 @@ def send_telegram_message(text, chat_id):
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
-    json_data = request.get_json(silent=True)
-    if json_data and "message" in json_data:
-        msg = json_data["message"]
-        if "text" in msg:
-            text, chat_id = msg["text"].strip(), msg["chat"]["id"]
-            if text.startswith("/start"):
-                send_telegram_message("👋 أهلاً بك! أرسل رمز السهم (مثل TSLA أو SPY) للحصول على التحليل الفني.", chat_id)
-            elif not text.startswith("/"):
-                send_telegram_message(generate_confirmed_signal(text), chat_id)
+    try:
+        json_data = request.get_json(force=True, silent=True)
+        if json_data and "message" in json_data:
+            msg = json_data["message"]
+            if "text" in msg:
+                text, chat_id = msg["text"].strip(), msg["chat"]["id"]
+                if text.startswith("/start"):
+                    send_telegram_message("👋 أهلاً بك! أرسل رمز السهم (مثل TSLA أو SPY) للحصول على التحليل الفني.", chat_id)
+                elif not text.startswith("/"):
+                    reply = generate_confirmed_signal(text)
+                    send_telegram_message(reply, chat_id)
+    except Exception as e:
+        print(f"Webhook Error: {e}")
     return "OK", 200
 
 @app.route('/')
