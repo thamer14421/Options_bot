@@ -1,93 +1,178 @@
 import os
 import requests
+import threading
+import time
 from datetime import datetime, timedelta
-from flask import Flask, request
+from flask import Flask
 
 app = Flask(__name__)
+
 TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
+CHAT_ID = "913401505"
 
 def get_stock_data_and_analysis(ticker):
+    """جلب بيانات السهم وتحليله فنياً عبر مؤشرات حقيقية (RSI & Moving Averages)"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker.upper()}?interval=15m&range=5d"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=5).json()
+        
         result = response['chart']['result'][0]
         prices = result['indicators']['quote'][0]['close']
+        # تنظيف البيانات من القيم الفارغة
         prices = [p for p in prices if p is not None]
-        if len(prices) < 14: return None
+        
+        if len(prices) < 14:
+            return None
+        
         current_price = round(prices[-1], 2)
-        gains, losses = [], []
+        
+        # حساب مؤشر RSI بسيط (14 فترة)
+        gains = []
+        losses = []
         for i in range(1, 15):
             change = prices[-i] - prices[-(i+1)]
-            if change >= 0: gains.append(change), losses.append(0)
-            else: gains.append(0), losses.append(abs(change))
+            if change >= 0:
+                gains.append(change)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(abs(change))
+                
         avg_gain = sum(gains) / 14
         avg_loss = sum(losses) / 14
-        rsi = 100 if avg_loss == 0 else round(100 - (100 / (1 + (avg_gain / avg_loss))), 1)
+        
+        if avg_loss == 0:
+            rsi = 100
+        else:
+            rs = avg_gain / avg_loss
+            rsi = round(100 - (100 / (1 + rs)), 1)
+            
+        # حساب متوسط الحركة SMA (20 فترة)
         sma_20 = sum(prices[-20:]) / min(len(prices), 20)
         
+        # اتخاذ القرار بناءً على التحليل الفني المؤكد
         if current_price > sma_20 and rsi < 65:
-            signal_type, sentiment, reason = "CALL", "تأكيد إيجابي (صاعد)", f"السهم فوق المتوسط و RSI دافئ ({rsi})"
+            signal_type = "CALL"
+            sentiment = "تأكيد إيجابي (صاعد) 📈"
+            reason = f"السهم يتداول فوق المتوسط و RSI دافئ ({rsi})"
+        elif current_price < sma_20 and rsi > 35:
+            signal_type = "PUT"
+            sentiment = "تأكيد سلبي (هابط) 📉"
+            reason = f"السهم يتداول تحت المتوسط و RSI مرتفع ({rsi})"
         else:
-            signal_type, sentiment, reason = "PUT", "تأكيد سلبي (هابط)", f"السهم تحت المتوسط و RSI مرتفع ({rsi})"
-        return {"price": current_price, "signal": signal_type, "sentiment": sentiment, "reason": reason, "rsi": rsi}
-    except:
+            # حالة حيادية مع ميل حسب الاتجاه اللحظي
+            if current_price >= sma_20:
+                signal_type = "CALL"
+                sentiment = "اتجاه صاعد مع حذر 📊"
+                reason = f"مستويات RSI عند ({rsi})"
+            else:
+                signal_type = "PUT"
+                sentiment = "اتجاه هابط مع حذر 📊"
+                reason = f"مستويات RSI عند ({rsi})"
+                
+        return {
+            "price": current_price,
+            "signal": signal_type,
+            "sentiment": sentiment,
+            "reason": reason,
+            "rsi": rsi
+        }
+    except Exception as e:
+        print(f"Error analyzing {ticker}: {e}")
         return None
 
 def get_next_valid_expiry():
+    """تحديد أقرب تاريخ انتهاء عقد أوبشن رسمي (يوم الجمعة)"""
     today = datetime.now()
     days_ahead = 4 - today.weekday()
-    if days_ahead <= 0: days_ahead += 7
-    return (today + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
+    if days_ahead <= 0:
+        days_ahead += 7
+    target_date = today + timedelta(days=days_ahead)
+    return target_date.strftime('%Y-%m-%d')
 
 def generate_confirmed_signal(ticker_name):
     ticker = ticker_name.upper().strip()
     analysis = get_stock_data_and_analysis(ticker)
-    if not analysis: return f"⚠️ تعذر جلب البيانات لسهم `{ticker}`."
-    price, signal_type = analysis["price"], analysis["signal"]
+    
+    if not analysis:
+        return f"⚠️ **تنبيه:** تعذر جلب البيانات التأكيدية لسهم `{ticker}`. تأكد من الرمز وحاول مجدداً."
+
+    price = analysis["price"]
+    signal_type = analysis["signal"]
     expiry_date = get_next_valid_expiry()
+
     if signal_type == "CALL":
-        emoji, strike, t1, t2, sl = "🟢 **شراء صعود (CALL)**", round(price * 1.01, 1), round(price * 1.015, 2), round(price * 1.03, 2), round(price * 0.99, 2)
+        emoji = "🟢 **شراء صعود (CALL)**"
+        strike_price = round(price * 1.01, 1)
+        target_1 = round(price * 1.015, 2)
+        target_2 = round(price * 1.03, 2)
+        stop_loss = round(price * 0.99, 2)
     else:
-        emoji, strike, t1, t2, sl = "🔴 **شراء هبوط (PUT)**", round(price * 0.99, 1), round(price * 0.985, 2), round(price * 0.97, 2), round(price * 1.01, 2)
-    return (
+        emoji = "🔴 **شراء هبوط (PUT)**"
+        strike_price = round(price * 0.99, 1)
+        target_1 = round(price * 0.985, 2)
+        target_2 = round(price * 0.97, 2)
+        stop_loss = round(price * 1.01, 2)
+
+    message = (
         f"🎯 **تأكيد تحليل فني لسهم ({ticker})**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 السعر اللحظي: `${price}`\n"
-        f"📊 مؤشر RSI: `{analysis['rsi']}`\n"
-        f"🔍 التأكيد الفني: {analysis['sentiment']}\n"
-        f"💡 سبب الإشارة: {analysis['reason']}\n"
+        f"💰 **السعر اللحظي:** `${price}`\n"
+        f"📊 **مؤشر RSI:** `{analysis['rsi']}`\n"
+        f"🔍 **التأكيد الفني:** {analysis['sentiment']}\n"
+        f"💡 **سبب الإشارة:** {analysis['reason']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🚀 توصية العقد التأكيدية: {emoji}\n"
-        f"📌 السترايك المناسب: `${strike}`\n"
-        f"📅 تاريخ الانتهاء الأكيد: `{expiry_date}`\n"
+        f"🚀 **توصية العقد التأكيدية:** {emoji}\n"
+        f"📌 **السترايك المناسب:** `${strike_price}`\n"
+        f"📅 **تاريخ الانتهاء الأكيد:** `{expiry_date}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 الهدف الأول: `${t1}`\n"
-        f"🚀 الهدف الثاني: `${t2}`\n"
-        f"🛡️ وقف الخسارة: `${sl}`\n"
+        f"🎯 **الهدف الأول:** `${target_1}`\n"
+        f"🚀 **الهدف الثاني:** `${target_2}`\n"
+        f"🛡️ **وقف الخسارة:** `${stop_loss}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ تحليل فني مؤكد بناءً على المؤشرات اللحظية!"
+        f"⚡ *تحليل فني مؤكد بناءً على المؤشرات اللحظية!*"
     )
+    return message
 
-def send_telegram_message(text, chat_id):
-    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+def send_telegram_message(text, target_chat_id=CHAT_ID):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {
+        "chat_id": target_chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    requests.post(url, json=payload)
 
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    json_data = request.get_json(silent=True)
-    if json_data and "message" in json_data:
-        msg = json_data["message"]
-        if "text" in msg:
-            text, chat_id = msg["text"].strip(), msg["chat"]["id"]
-            if text.startswith("/start"):
-                send_telegram_message("👋 أهلاً بك! أرسل رمز السهم (مثل TSLA أو SPY) للحصول على التحليل الفني.", chat_id)
-            elif not text.startswith("/"):
-                send_telegram_message(generate_confirmed_signal(text), chat_id)
-    return "OK", 200
+def start_telegram_bot():
+    offset = 0
+    print("البوت المؤكد بدأ العمل...")
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=10"
+            res = requests.get(url, timeout=15).json()
+            if "result" in res:
+                for update in res["result"]:
+                    offset = update["update_id"] + 1
+                    if "message" in update and "text" in update["message"]:
+                        user_text = update["message"]["text"].strip()
+                        user_chat_id = update["message"]["chat"]["id"]
+                        
+                        if not user_text.startswith("/"):
+                            reply = generate_confirmed_signal(user_text)
+                            send_telegram_message(reply, target_chat_id=user_chat_id)
+        except Exception as e:
+            print(f"Error in polling: {e}")
+            time.sleep(3)
 
 @app.route('/')
 def home():
-    return "Bot is active!"
+    return "Confirmed Options Bot is Running!"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    t = threading.Thread(target=start_telegram_bot)
+    t.daemon = True
+    t.start()
+    
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
