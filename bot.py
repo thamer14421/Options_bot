@@ -8,7 +8,6 @@ app = Flask(__name__)
 TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
 
 def get_stock_data_and_analysis(ticker):
-    """جلب بيانات السهم وتحليله فنياً مع الاستراتيجيات المتقدمة"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker.upper()}?interval=15m&range=5d"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -23,7 +22,6 @@ def get_stock_data_and_analysis(ticker):
         
         current_price = round(prices[-1], 2)
         
-        # حساب مؤشر RSI (14 فترة)
         gains = []
         losses = []
         for i in range(1, 15):
@@ -44,58 +42,39 @@ def get_stock_data_and_analysis(ticker):
             rs = avg_gain / avg_loss
             rsi = round(100 - (100 / (1 + rs)), 1)
             
-        # حساب متوسط الحركة SMA (20 فترة)
         sma_20 = sum(prices[-20:]) / min(len(prices), 20)
-        
-        # استراتيجيات تحديد الاتجاه والتأكيد الفني
         distance_from_sma = round(((current_price - sma_20) / sma_20) * 100, 2)
         
         if current_price > sma_20 and rsi < 65:
             signal_type = "CALL"
             sentiment = "تأكيد إيجابي قوي (صاعد) 📈"
-            reason = f"السهم يتداول فوق المتوسط بـ ({distance_from_sma}%) مع استقرار RSI عند ({rsi}) في نطاق الشراء الآمن."
-        elif current_price < sma_20 and rsi > 35:
+            reason = f"السهم يتداول فوق المتوسط بـ ({distance_from_sma}%) مع استقرار RSI عند ({rsi})."
+        else:
             signal_type = "PUT"
             sentiment = "تأكيد سلبي قوي (هابط) 📉"
-            reason = f"السهم يتداول تحت المتوسط بـ ({abs(distance_from_sma)}%) مع بقاء RSI عند ({rsi}) في نطاق الضغط البيعي."
-        else:
-            if current_price >= sma_20:
-                signal_type = "CALL"
-                sentiment = "اتجاه صاعد حذِر 📊"
-                reason = f"اختبار لمناطق المقاومة مع تسجيل RSI لـ ({rsi})."
-            else:
-                signal_type = "PUT"
-                sentiment = "اتجاه هابط حذِر 📊"
-                reason = f"اختبار لمناطق الدعم مع تسجيل RSI لـ ({rsi})."
+            reason = f"السهم يتداول تحت المتوسط بـ ({abs(distance_from_sma)}%) مع بقاء RSI عند ({rsi})."
                 
         return {
-            "price": current_price,
-            "signal": signal_type,
-            "sentiment": sentiment,
-            "reason": reason,
-            "rsi": rsi,
-            "sma": round(sma_20, 2),
-            "distance": distance_from_sma
+            "price": current_price, "signal": signal_type,
+            "sentiment": sentiment, "reason": reason,
+            "rsi": rsi, "sma": round(sma_20, 2)
         }
     except Exception as e:
-        print(f"Error analyzing {ticker}: {e}")
+        print(f"Error: {e}")
         return None
 
 def get_next_valid_expiry():
-    """تحديد أقرب تاريخ انتهاء عقد أوبشن رسمي (يوم الجمعة)"""
     today = datetime.now()
     days_ahead = 4 - today.weekday()
-    if days_ahead <= 0:
-        days_ahead += 7
-    target_date = today + timedelta(days=days_ahead)
-    return target_date.strftime('%Y-%m-%d')
+    if days_ahead <= 0: days_ahead += 7
+    return (today + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
 
 def generate_confirmed_signal(ticker_name):
     ticker = ticker_name.upper().strip()
     analysis = get_stock_data_and_analysis(ticker)
     
     if not analysis:
-        return f"⚠️ **تنبيه:** تعذر جلب البيانات التأكيدية لسهم `{ticker}`. تأكد من الرمز وحاول مجدداً."
+        return f"⚠️ **تنبيه:** تعذر جلب البيانات للسهم `{ticker}`. تأكد من الرمز."
 
     price = analysis["price"]
     signal_type = analysis["signal"]
@@ -103,74 +82,60 @@ def generate_confirmed_signal(ticker_name):
 
     if signal_type == "CALL":
         emoji = "🟢 **شراء صعود (CALL)**"
-        strike_price = round(price * 1.01, 1)
-        target_1 = round(price * 1.015, 2)
-        target_2 = round(price * 1.03, 2)
-        stop_loss = round(price * 0.99, 2)
-        strat_note = "📌 **استراتيجية العقد:** الزخم الشرائي والسيولة فوق المتوسط تدعم استمرار الصعود واختراق الأهداف."
+        strike = round(price * 1.01, 1)
+        t1 = round(price * 1.015, 2)
+        t2 = round(price * 1.03, 2)
+        sl = round(price * 0.99, 2)
+        note = "📌 **الاستراتيجية:** الزخم الشرائي يدعم صعود السهم واختراق الأهداف."
     else:
         emoji = "🔴 **شراء هبوط (PUT)**"
-        strike_price = round(price * 0.99, 1)
-        target_1 = round(price * 0.985, 2)
-        target_2 = round(price * 0.97, 2)
-        stop_loss = round(price * 1.01, 2)
-        strat_note = "📌 **استراتيجية العقد:** الضغط البيعي واستمرار التداول تحت المتوسط يرجح الهبوط وجني الأرباح نزولاً."
+        strike = round(price * 0.99, 1)
+        t1 = round(price * 0.985, 2)
+        t2 = round(price * 0.97, 2)
+        sl = round(price * 1.01, 2)
+        note = "📌 **الاستراتيجية:** الضغط البيعي واستمرار التداول تحت المتوسط يرجح الهبوط."
 
-    message = (
-        f"🎯 **تحليل صفقات الأوبشن الاستراتيجي ({ticker})**\n"
+    return (
+        f"🎯 **تحليل صفقات الأوبشن ({ticker})**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 **السعر اللحظي:** `${price}` | 📉 **المتوسط (SMA20):** `${analysis['sma']}`\n"
-        f"📊 **مؤشر القوة RSI:** `{analysis['rsi']}`\n"
-        f"🔍 **حالة الاتجاه:** {analysis['sentiment']}\n"
-        f"💡 **المعيار الاستراتيجي:** {analysis['reason']}\n"
+        f"💰 **السعر:** `${price}` | 📉 **SMA20:** `${analysis['sma']}`\n"
+        f"📊 **RSI:** `{analysis['rsi']}`\n"
+        f"🔍 **الاتجاه:** {analysis['sentiment']}\n"
+        f"💡 **المعيار:** {analysis['reason']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🚀 **التوصية المؤكدة:** {emoji}\n"
-        f"{strat_note}\n"
-        f"📌 **السترايك المقترح:** `${strike_price}`\n"
-        f"📅 **تاريخ الانتهاء:** `{expiry_date}`\n"
+        f"🚀 **التوصية:** {emoji}\n"
+        f"{note}\n"
+        f"📌 **السترايك:** `${strike}` | 📅 **الانتهاء:** `{expiry_date}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 **الهدف الأول:** `${target_1}`\n"
-        f"🚀 **الهدف الثاني:** `${target_2}`\n"
-        f"🛡️ **وقف الخسارة:** `${stop_loss}`\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ *نظام الويب هوك السريع - أداء فني دقيق ومستقر!*"
+        f"🎯 **الهدف 1:** `${t1}` | 🚀 **الهدف 2:** `${t2}`\n"
+        f"🛡️ **وقف الخسارة:** `${sl}`"
     )
-    return message
 
-def send_telegram_message(text, target_chat_id):
+def send_telegram_message(text, chat_id):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": target_chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
-    requests.post(url, json=payload)
+    requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
-@app.route(f'/{TOKEN}', methods=['POST'])
+# مسار عام يستقبل أي رسالة بدون تعقيد الشروط
+@app.route('/', methods=['POST'])
 def webhook():
-    """استقبال رسائل التليجرام بشكل فوري وخفيف دون تعليق السيرفر"""
-    json_data = request.get_json()
-    if json_data and "message" in json_data:
-        message = json_data["message"]
-        if "text" in message:
-            user_text = message["text"].strip()
-            user_chat_id = message["chat"]["id"]
+    try:
+        json_data = request.get_json(force=True)
+        if "message" in json_data and "text" in json_data["message"]:
+            text = json_data["message"]["text"].strip()
+            chat_id = json_data["message"]["chat"]["id"]
             
-            if user_text.startswith("/start"):
-                welcome_msg = (
-                    "👋 **أهلاً بك في بوت تحليل صفقات الأوبشن الاستراتيجي!**\n\n"
-                    "أرسل رمز السهم (مثل: `TSLA`, `NVDA`, `SPY`) لتحصل على تحليل استراتيجي متكامل يدعم قرارك (CALL / PUT) مع الأهداف والسترايك بدقة. 🚀"
-                )
-                send_telegram_message(welcome_msg, user_chat_id)
-            elif not user_text.startswith("/"):
-                reply = generate_confirmed_signal(user_text)
-                send_telegram_message(reply, user_chat_id)
-                
+            if text.startswith("/start"):
+                send_telegram_message("👋 أهلاً بك! أرسل رمز السهم (مثل TSLA) لتحليل الأوبشن.", chat_id)
+            elif not text.startswith("/"):
+                reply = generate_confirmed_signal(text)
+                send_telegram_message(reply, chat_id)
+    except Exception as e:
+        print(f"Webhook Error: {e}")
     return "OK", 200
 
-@app.route('/')
+@app.route('/status', methods=['GET'])
 def home():
-    return "Strategic Webhook Bot is Active & Running 24/7!"
+    return "Bot is running perfectly!"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
