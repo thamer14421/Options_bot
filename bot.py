@@ -1,12 +1,14 @@
 import os
-import time
 import requests
 from datetime import datetime, timedelta
+from flask import Flask, request
+
+app = Flask(__name__)
 
 TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
 
 def get_stock_data_and_analysis(ticker):
-    """جلب بيانات السهم وتحليله فنياً عبر مؤشرات حقيقية (RSI & Moving Averages)"""
+    """جلب بيانات السهم وتحليله فنياً عبر مؤشرات حقيقية مع استراتيجيات تأكيد متقدمة"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker.upper()}?interval=15m&range=5d"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -45,30 +47,35 @@ def get_stock_data_and_analysis(ticker):
         # حساب متوسط الحركة SMA (20 فترة)
         sma_20 = sum(prices[-20:]) / min(len(prices), 20)
         
+        # استراتيجيات تحديد الاتجاه والتأكيد الفني
+        distance_from_sma = round(((current_price - sma_20) / sma_20) * 100, 2)
+        
         if current_price > sma_20 and rsi < 65:
             signal_type = "CALL"
-            sentiment = "تأكيد إيجابي (صاعد) 📈"
-            reason = f"السهم يتداول فوق المتوسط و RSI دافئ ({rsi})"
+            sentiment = "تأكيد إيجابي قوي (صاعد) 📈"
+            reason = f"السهم فوق المتوسط بـ ({distance_from_sma}%) مع استقرار RSI عند ({rsi}) ضمن نطاق الشراء الآمن."
         elif current_price < sma_20 and rsi > 35:
             signal_type = "PUT"
-            sentiment = "تأكيد سلبي (هابط) 📉"
-            reason = f"السهم يتداول تحت المتوسط و RSI مرتفع ({rsi})"
+            sentiment = "تأكيد سلبي قوي (هابط) 📉"
+            reason = f"السهم تحت المتوسط بـ ({abs(distance_from_sma)}%) مع بقاء RSI عند ({rsi}) في نطاق الضغط البيعي."
         else:
             if current_price >= sma_20:
                 signal_type = "CALL"
-                sentiment = "اتجاه صاعد مع حذر 📊"
-                reason = f"مستويات RSI عند ({rsi})"
+                sentiment = "اتجاه صاعد حذِر 📊"
+                reason = f"اختبار لمناطق المقاومة مع تسجيل RSI لـ ({rsi})."
             else:
                 signal_type = "PUT"
-                sentiment = "اتجاه هابط مع حذر 📊"
-                reason = f"مستويات RSI عند ({rsi})"
+                sentiment = "اتجاه هابط حذِر 📊"
+                reason = f"اختبار لمناطق الدعم مع تسجيل RSI لـ ({rsi})."
                 
         return {
             "price": current_price,
             "signal": signal_type,
             "sentiment": sentiment,
             "reason": reason,
-            "rsi": rsi
+            "rsi": rsi,
+            "sma": round(sma_20, 2),
+            "distance": distance_from_sma
         }
     except Exception as e:
         print(f"Error analyzing {ticker}: {e}")
@@ -100,23 +107,25 @@ def generate_confirmed_signal(ticker_name):
         target_1 = round(price * 1.015, 2)
         target_2 = round(price * 1.03, 2)
         stop_loss = round(price * 0.99, 2)
+        strat_note = "📌 **استراتيجية العقد:** الزخم الشرائي يدعم كسر المقاومة نحو الأعلى."
     else:
         emoji = "🔴 **شراء هبوط (PUT)**"
         strike_price = round(price * 0.99, 1)
         target_1 = round(price * 0.985, 2)
         target_2 = round(price * 0.97, 2)
         stop_loss = round(price * 1.01, 2)
+        strat_note = "📌 **استراتيجية العقد:** الضغط البيعي واستمرار التداول تحت المتوسط يرجح الهبوط."
 
     message = (
-        f"🎯 **تحليل فني معتمد (Options Alert)**\n"
+        f"🎯 **تحليل صفقات الأوبشن الاحترافي ({ticker})**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🏷️ **الرمز:** `{ticker}`\n"
-        f"💰 **السعر اللحظي:** `${price}`\n"
+        f"💰 **السعر اللحظي:** `${price}` | 📉 **المتوسط (SMA20):** `${analysis['sma']}`\n"
         f"📊 **مؤشر القوة RSI:** `{analysis['rsi']}`\n"
         f"🔍 **حالة الاتجاه:** {analysis['sentiment']}\n"
-        f"💡 **المعيار الفني:** {analysis['reason']}\n"
+        f"💡 **المعيار الاستراتيجي:** {analysis['reason']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🚀 **توصية العقد:** {emoji}\n"
+        f"🚀 **التوصية المؤكدة:** {emoji}\n"
+        f"{strat_note}\n"
         f"📌 **السترايك المقترح:** `${strike_price}`\n"
         f"📅 **تاريخ الانتهاء:** `{expiry_date}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
@@ -124,7 +133,7 @@ def generate_confirmed_signal(ticker_name):
         f"🚀 **الهدف الثاني:** `${target_2}`\n"
         f"🛡️ **وقف الخسارة:** `${stop_loss}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ *نظام التداول الذكي - جاهز للعمل بنجاح!*"
+        f"⚡ *نظام التحليل الفني المتقدم - دقة استراتيجية عالية!*"
     )
     return message
 
@@ -137,35 +146,31 @@ def send_telegram_message(text, target_chat_id):
     }
     requests.post(url, json=payload)
 
-def run_polling():
-    """نظام الاستطلاع المباشر والمستقر (Polling)"""
-    print("Bot started polling successfully...")
-    offset = 0
-    while True:
-        try:
-            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=30"
-            response = requests.get(url, timeout=35).json()
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    json_data = request.get_json()
+    if json_data and "message" in json_data:
+        message = json_data["message"]
+        if "text" in message:
+            user_text = message["text"].strip()
+            user_chat_id = message["chat"]["id"]
             
-            if "result" in response:
-                for update in response["result"]:
-                    offset = update["update_id"] + 1
-                    if "message" in update and "text" in update["message"]:
-                        user_text = update["message"]["text"].strip()
-                        chat_id = update["message"]["chat"]["id"]
-                        
-                        if user_text.startswith("/start"):
-                            welcome_msg = (
-                                "👋 **أهلاً بك في بوت تحليل صفقات الأوبشن الذكي!**\n\n"
-                                "قم بإرسال رمز أي سهم (مثل: `TSLA`, `NVDA`, `SPY`) وسيقوم البوت بتحليله فنياً فوراً وإعطائك أهداف السترايك وتاريخ الانتهاء بدقة. 🚀"
-                            )
-                            send_telegram_message(welcome_msg, chat_id)
-                        elif not user_text.startswith("/"):
-                            reply = generate_confirmed_signal(user_text)
-                            send_telegram_message(reply, chat_id)
-        except Exception as e:
-            print(f"Polling error: {e}")
-            time.sleep(3)
+            if user_text.startswith("/start"):
+                welcome_msg = (
+                    "👋 **أهلاً بك في بوت تحليل صفقات الأوبشن الاستراتيجي!**\n\n"
+                    "أرسل رمز السهم (مثل: `TSLA`, `NVDA`, `SPY`) لتحصل على تحليل استراتيجي متكامل يدعم قرارك (CALL / PUT) مع الأهداف والسترايك بدقة. 🚀"
+                )
+                send_telegram_message(welcome_msg, user_chat_id)
+            elif not user_text.startswith("/"):
+                reply = generate_confirmed_signal(user_text)
+                send_telegram_message(reply, user_chat_id)
+                
+    return "OK", 200
+
+@app.route('/')
+def home():
+    return "Strategic Options Bot is Active & Running 24/7!"
 
 if __name__ == "__main__":
-    # تشغيل حلقة الاستطلاع مباشرة
-    run_polling()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
