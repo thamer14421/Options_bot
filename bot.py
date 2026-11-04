@@ -1,9 +1,6 @@
-import os
+import time
 import requests
 from datetime import datetime, timedelta
-from flask import Flask, request
-
-app = Flask(__name__)
 
 TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
 
@@ -113,29 +110,32 @@ def send_telegram_message(text, chat_id):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
-# ربط المسار بدقة متناهية مع التوكن لمنع أخطاء 404
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    try:
-        json_data = request.get_json(force=True)
-        if json_data and "message" in json_data:
-            msg = json_data["message"]
-            if "text" in msg:
-                text = msg["text"].strip()
-                chat_id = msg["chat"]["id"]
-                if text.startswith("/start"):
-                    send_telegram_message("👋 أهلاً بك! أرسل رمز السهم (مثل TSLA أو SPY) للحصول على التحليل الفني.", chat_id)
-                elif not text.startswith("/"):
-                    reply = generate_confirmed_signal(text)
-                    send_telegram_message(reply, chat_id)
-    except Exception as e:
-        print(f"Error: {e}")
-    return "OK", 200
-
-@app.route('/')
-def home():
-    return "Bot is active!"
+def run_polling():
+    print("Bot polling started...")
+    offset = 0
+    # إلغاء أي ويب هوك قديم عالق لكي يعمل الـ Polling بنجاح تام
+    requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=True")
+    
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=30"
+            response = requests.get(url, timeout=35).json()
+            
+            if "result" in response:
+                for update in response["result"]:
+                    offset = update["update_id"] + 1
+                    if "message" in update and "text" in update["message"]:
+                        text = update["message"]["text"].strip()
+                        chat_id = update["message"]["chat"]["id"]
+                        
+                        if text.startswith("/start"):
+                            send_telegram_message("👋 أهلاً بك! أرسل رمز السهم (مثل TSLA أو SPY) للحصول على التحليل الفني.", chat_id)
+                        elif not text.startswith("/"):
+                            reply = generate_confirmed_signal(text)
+                            send_telegram_message(reply, chat_id)
+        except Exception as e:
+            print(f"Polling error: {e}")
+            time.sleep(3)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    run_polling()
