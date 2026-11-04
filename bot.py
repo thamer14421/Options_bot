@@ -46,18 +46,15 @@ def get_stock_data_and_analysis(ticker):
         if current_price > sma_20 and rsi < 65:
             signal_type = "CALL"
             sentiment = "تأكيد إيجابي (صاعد)"
-            reason = f"السهم يتداول تحت المتوسط و RSI مرتفع ({rsi})" if current_price < sma_20 else f"السهم يتداول فوق المتوسط و RSI دافئ ({rsi})"
+            reason = f"السهم فوق المتوسط و RSI دافئ ({rsi})"
         else:
             signal_type = "PUT"
             sentiment = "تأكيد سلبي (هابط)"
-            reason = f"السهم يتداول تحت المتوسط و RSI مرتفع ({rsi})"
+            reason = f"السهم تحت المتوسط و RSI مرتفع ({rsi})"
                 
         return {
-            "price": current_price,
-            "signal": signal_type,
-            "sentiment": sentiment,
-            "reason": reason,
-            "rsi": rsi
+            "price": current_price, "signal": signal_type,
+            "sentiment": sentiment, "reason": reason, "rsi": rsi
         }
     except Exception as e:
         print(f"Error: {e}")
@@ -82,16 +79,16 @@ def generate_confirmed_signal(ticker_name):
 
     if signal_type == "CALL":
         emoji = "🟢 **شراء صعود (CALL)**"
-        strike_price = round(price * 1.01, 1)
-        target_1 = round(price * 1.015, 2)
-        target_2 = round(price * 1.03, 2)
-        stop_loss = round(price * 0.99, 2)
+        strike = round(price * 1.01, 1)
+        t1 = round(price * 1.015, 2)
+        t2 = round(price * 1.03, 2)
+        sl = round(price * 0.99, 2)
     else:
         emoji = "🔴 **شراء هبوط (PUT)**"
-        strike_price = round(price * 0.99, 1)
-        target_1 = round(price * 0.985, 2)
-        target_2 = round(price * 0.97, 2)
-        stop_loss = round(price * 1.01, 2)
+        strike = round(price * 0.99, 1)
+        t1 = round(price * 0.985, 2)
+        t2 = round(price * 0.97, 2)
+        sl = round(price * 1.01, 2)
 
     return (
         f"🎯 **تأكيد تحليل فني لسهم ({ticker})**\n"
@@ -102,12 +99,12 @@ def generate_confirmed_signal(ticker_name):
         f"💡 سبب الإشارة: {analysis['reason']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🚀 توصية العقد التأكيدية: {emoji}\n"
-        f"📌 السترايك المناسب: `${strike_price}`\n"
+        f"📌 السترايك المناسب: `${strike}`\n"
         f"📅 تاريخ الانتهاء الأكيد: `{expiry_date}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 الهدف الأول: `${target_1}`\n"
-        f"🚀 الهدف الثاني: `${target_2}`\n"
-        f"🛡️ وقف الخسارة: `${stop_loss}`\n"
+        f"🎯 الهدف الأول: `${t1}`\n"
+        f"🚀 الهدف الثاني: `${t2}`\n"
+        f"🛡️ وقف الخسارة: `${sl}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ تحليل فني مؤكد بناءً على المؤشرات اللحظية!"
     )
@@ -116,19 +113,23 @@ def send_telegram_message(text, chat_id):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
+# ربط المسار بدقة متناهية مع التوكن لمنع أخطاء 404
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
-    json_data = request.get_json()
-    if json_data and "message" in json_data:
-        msg = json_data["message"]
-        if "text" in msg:
-            text = msg["text"].strip()
-            chat_id = msg["chat"]["id"]
-            if text.startswith("/start"):
-                send_telegram_message("👋 أهلاً بك! أرسل رمز السهم (مثل TSLA أو SPY) للحصول على التحليل الفني.", chat_id)
-            elif not text.startswith("/"):
-                reply = generate_confirmed_signal(text)
-                send_telegram_message(reply, chat_id)
+    try:
+        json_data = request.get_json(force=True)
+        if json_data and "message" in json_data:
+            msg = json_data["message"]
+            if "text" in msg:
+                text = msg["text"].strip()
+                chat_id = msg["chat"]["id"]
+                if text.startswith("/start"):
+                    send_telegram_message("👋 أهلاً بك! أرسل رمز السهم (مثل TSLA أو SPY) للحصول على التحليل الفني.", chat_id)
+                elif not text.startswith("/"):
+                    reply = generate_confirmed_signal(text)
+                    send_telegram_message(reply, chat_id)
+    except Exception as e:
+        print(f"Error: {e}")
     return "OK", 200
 
 @app.route('/')
