@@ -1,2 +1,5 @@
-requests
-flask
+flask>=3.0
+gunicorn>=22.0
+requests>=2.32
+yfinance>=0.2.50
+pandas>=2.0
