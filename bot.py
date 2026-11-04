@@ -26,6 +26,8 @@ Optional env vars (rating / trade plan):
   MAX_SPREAD        max bid/ask spread as a fraction of mid price (default 0.12)
   ATR_STOP          stop distance in ATRs (default 1.5)
   ATR_TARGET        final target distance in ATRs (default 3.0)
+  GEX_EXPIRIES      nearest expiries used for gamma exposure (default 4)
+  GEX_MAX_DTE       max days to expiry used for gamma exposure (default 45)
 """
 
 import hmac
@@ -87,6 +89,9 @@ MAX_DTE = int(_env("MAX_DTE", "45"))
 MAX_SPREAD = float(_env("MAX_SPREAD", "0.12"))
 ATR_STOP = float(_env("ATR_STOP", "1.5"))
 ATR_TARGET = float(_env("ATR_TARGET", "3.0"))
+GEX_EXPIRIES = int(_env("GEX_EXPIRIES", "4"))
+GEX_MAX_DTE = int(_env("GEX_MAX_DTE", "45"))
+RISK_FREE = 0.04
 
 API = f"https://api.telegram.org/bot{TOKEN}"
 NY = ZoneInfo("America/New_York")
@@ -304,6 +309,64 @@ def technicals(t):
     }
 
 
+def _bs_gamma(S, K, T, sigma):
+    if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        return 0.0
+    d1 = (math.log(S / K) + (RISK_FREE + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    pdf = math.exp(-0.5 * d1 * d1) / math.sqrt(2 * math.pi)
+    return pdf / (S * sigma * math.sqrt(T))
+
+
+def compute_gex(t, price):
+    """Estimate dealer gamma exposure from open interest (dealers assumed long calls / short puts)."""
+    today = datetime.now(NY).date()
+    opts, used = [], 0
+    for exp in t.options:
+        dte = (date.fromisoformat(exp) - today).days
+        if dte < 0:
+            continue
+        if dte > GEX_MAX_DTE or used >= GEX_EXPIRIES:
+            break
+        try:
+            chain = t.option_chain(exp)
+        except Exception:  # noqa: BLE001
+            continue
+        used += 1
+        tau = max(dte, 0.5) / 365.0
+        for sign, df in ((1, chain.calls), (-1, chain.puts)):
+            for row in df.itertuples():
+                k, oi, iv = _num(row.strike), _num(row.openInterest), _num(row.impliedVolatility)
+                if oi <= 0 or iv < 0.05 or not (price * 0.7 <= k <= price * 1.3):
+                    continue
+                opts.append((sign, k, oi, iv, tau))
+    if not opts:
+        return None
+
+    def net_at(spot):
+        return sum(s * _bs_gamma(spot, k, tau, iv) * oi * 100 * spot * spot * 0.01 for s, k, oi, iv, tau in opts)
+
+    calls, puts = {}, {}
+    for s, k, oi, iv, tau in opts:
+        g = _bs_gamma(price, k, tau, iv) * oi * 100 * price * price * 0.01
+        book = calls if s > 0 else puts
+        book[k] = book.get(k, 0.0) + g
+    above = {k: v for k, v in calls.items() if k >= price}
+    below = {k: v for k, v in puts.items() if k <= price}
+    call_wall = max(above, key=above.get) if above else None
+    put_wall = max(below, key=below.get) if below else None
+
+    crossings, prev_s, prev_v = [], None, None
+    for i in range(61):
+        spot = price * (0.85 + 0.005 * i)
+        v = net_at(spot)
+        if prev_v is not None and prev_v * v < 0:
+            crossings.append(prev_s + (spot - prev_s) * (-prev_v) / (v - prev_v))
+        prev_s, prev_v = spot, v
+    flip = min(crossings, key=lambda c: abs(c - price)) if crossings else None
+
+    return {"net": net_at(price), "flip": flip, "call_wall": call_wall, "put_wall": put_wall}
+
+
 def pick_contract(t, side, price):
     """Pick a liquid near-the-money contract between MIN_DTE and MAX_DTE from the real chain."""
     today = datetime.now(NY).date()
@@ -441,6 +504,22 @@ def evaluate(sym, flow_hits=None):
 
     side = "CALL" if score > 0 else "PUT"
     strong = abs(score) >= STRONG_SCORE and abs(trend_pts) == 2 and trend_pts * score > 0
+
+    gex = None
+    try:
+        gex = compute_gex(t, p)
+    except Exception as e:  # noqa: BLE001
+        log.warning("gex failed %s: %s", sym, type(e).__name__)
+    gex_warn = None
+    if gex and abs(score) >= 3:
+        atr_ = tech["atr"]
+        cw, pw = gex["call_wall"], gex["put_wall"]
+        if score > 0 and cw and 0 < cw - p <= atr_:
+            gex_warn = f"\u062c\u062f\u0627\u0631 CALL \u0639\u0646\u062f ${cw:g} \u0642\u0631\u064a\u0628 \u0641\u0648\u0642 \u0627\u0644\u0633\u0639\u0631 \u0648\u063a\u0627\u0644\u0628\u0627\u064b \u064a\u0639\u0645\u0644 \u0643\u0645\u0642\u0627\u0648\u0645\u0629\u060c \u0641\u0627\u0644\u0635\u0639\u0648\u062f \u0645\u0645\u0643\u0646 \u064a\u062a\u0639\u062b\u0631 \u0639\u0646\u062f\u0647."
+            strong = False
+        elif score < 0 and pw and 0 < p - pw <= atr_:
+            gex_warn = f"\u062c\u062f\u0627\u0631 PUT \u0639\u0646\u062f ${pw:g} \u0642\u0631\u064a\u0628 \u062a\u062d\u062a \u0627\u0644\u0633\u0639\u0631 \u0648\u063a\u0627\u0644\u0628\u0627\u064b \u064a\u0639\u0645\u0644 \u0643\u062f\u0639\u0645\u060c \u0641\u0627\u0644\u0647\u0628\u0648\u0637 \u0645\u0645\u0643\u0646 \u064a\u062a\u0639\u062b\u0631 \u0639\u0646\u062f\u0647."
+            strong = False
     if strong:
         label = "\u0642\u0648\u064a\u0629"
     elif abs(score) >= 3:
@@ -460,6 +539,8 @@ def evaluate(sym, flow_hits=None):
         "plan": None,
         "contract": None,
         "earnings": None,
+        "gex": gex,
+        "gex_warn": gex_warn,
     }
 
     if label != "\u0645\u062d\u0627\u064a\u062f\u0629":
@@ -529,10 +610,39 @@ def format_hits(hits, ratings=None, title="\U0001f525 \u0646\u0634\u0627\u0637 \
     return f"{out}\n\n{DISCLAIMER}\n\u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0645\u0646 Yahoo \u0648\u0642\u062f \u062a\u062a\u0623\u062e\u0631 ~15 \u062f\u0642\u064a\u0642\u0629."
 
 
+def format_gex(g, price):
+    net = g["net"]
+    if abs(net) < 100_000:
+        regime, net_txt = "\u0645\u062a\u0639\u0627\u062f\u0644 (\u0645\u0627 \u0641\u064a\u0647 \u0645\u064a\u0644 \u0648\u0627\u0636\u062d)", money(abs(net))
+    elif net > 0:
+        regime, net_txt = "\u0645\u0648\u062c\u0628 (\u0635\u0646\u0627\u0639 \u0627\u0644\u0633\u0648\u0642 \u064a\u062e\u0641\u0641\u0648\u0646 \u0627\u0644\u062d\u0631\u0643\u0629)", "+" + money(net)
+    else:
+        regime, net_txt = "\u0633\u0627\u0644\u0628 (\u0627\u0644\u062d\u0631\u0643\u0629 \u062a\u062a\u0636\u062e\u0645)", "-" + money(abs(net))
+    lines = [
+        "\U0001f9f2 \u0627\u0644\u062c\u0627\u0645\u0627 (GEX):",
+        f"\u0627\u0644\u0648\u0636\u0639: {regime}",
+        f"\u0635\u0627\u0641\u064a GEX: {net_txt} \u0644\u0643\u0644 1% \u062d\u0631\u0643\u0629",
+    ]
+    if g["flip"]:
+        side = "\u0627\u0644\u0633\u0639\u0631 \u0641\u0648\u0642\u0647" if price > g["flip"] else "\u0627\u0644\u0633\u0639\u0631 \u062a\u062d\u062a\u0647"
+        lines.append(f"\u0645\u0633\u062a\u0648\u0649 \u0642\u0644\u0628 \u0627\u0644\u062c\u0627\u0645\u0627: ${g['flip']:.2f} ({side})")
+    if g["call_wall"]:
+        lines.append(f"\u062c\u062f\u0627\u0631 CALL (\u0645\u0642\u0627\u0648\u0645\u0629 \u0645\u062d\u062a\u0645\u0644\u0629): ${g['call_wall']:g}")
+    if g["put_wall"]:
+        lines.append(f"\u062c\u062f\u0627\u0631 PUT (\u062f\u0639\u0645 \u0645\u062d\u062a\u0645\u0644): ${g['put_wall']:g}")
+    lines.append("\u062a\u0642\u062f\u064a\u0631 \u062a\u0642\u0631\u064a\u0628\u064a \u0645\u0646 \u0628\u064a\u0627\u0646\u0627\u062a Yahoo\u060c \u0648\u0644\u064a\u0633 \u0631\u0642\u0645\u0627\u064b \u0631\u0633\u0645\u064a\u0627\u064b.")
+    return "\n".join(lines)
+
+
 def format_evaluation(ev):
     lines = [f"\U0001f4ca {ev['symbol']}  ${ev['price']:.2f}", f"\u0627\u0644\u062a\u0642\u064a\u064a\u0645: {rating_line(ev)}", ""]
     lines.append("\u0627\u0644\u0623\u0633\u0628\u0627\u0628:")
     lines.extend(f"\u2022 {r}" for r in ev["reasons"])
+
+    if ev.get("gex"):
+        lines.append("\n" + format_gex(ev["gex"], ev["price"]))
+    if ev.get("gex_warn"):
+        lines.append("\n\u26a0\ufe0f " + ev["gex_warn"])
 
     plan, c = ev["plan"], ev["contract"]
     if plan is None:
@@ -563,6 +673,21 @@ def format_evaluation(ev):
             )
     lines.append(f"\n{DISCLAIMER}")
     return "\n".join(lines)
+
+
+def gamma_report(raw):
+    sym = raw.upper().strip().lstrip("$")
+    if not re.fullmatch(r"[A-Z][A-Z.\-]{0,5}", sym):
+        return "\u0627\u0643\u062a\u0628 \u0627\u0644\u0623\u0645\u0631 \u0645\u0639 \u0631\u0645\u0632 \u0627\u0644\u0633\u0647\u0645\u060c \u0645\u062b\u0644: /gamma TSLA"
+    t = yf.Ticker(sym)
+    h = t.history(period="1d")
+    if h is None or h.empty:
+        return f"\u0645\u0627 \u0644\u0642\u064a\u062a \u0628\u064a\u0627\u0646\u0627\u062a \u0644\u0644\u0631\u0645\u0632 {sym}"
+    price = float(h["Close"].iloc[-1])
+    g = compute_gex(t, price)
+    if not g:
+        return f"\u0645\u0627 \u0644\u0642\u064a\u062a \u0628\u064a\u0627\u0646\u0627\u062a \u0623\u0648\u0628\u0634\u0646\u0632 \u0643\u0627\u0641\u064a\u0629 \u0644\u062d\u0633\u0627\u0628 \u0627\u0644\u062c\u0627\u0645\u0627 \u0639\u0644\u0649 {sym}"
+    return f"\U0001f4ca {sym}  ${price:.2f}\n\n{format_gex(g, price)}\n\n{DISCLAIMER}"
 
 
 def analyze(raw):
@@ -596,6 +721,7 @@ HELP = (
     "\u0623\u0648\u0627\u0645\u0631 \u0627\u0644\u0628\u0648\u062a:\n"
     "\u2022 \u0623\u0631\u0633\u0644 \u0631\u0645\u0632 \u0633\u0647\u0645 (\u0645\u062b\u0644 TSLA) \u0648\u064a\u062c\u064a\u0643 \u062a\u0642\u064a\u064a\u0645 + \u062e\u0637\u0629 + \u0639\u0642\u062f \u0645\u0642\u062a\u0631\u062d\n"
     "\u2022 /scan \u0641\u062d\u0635 \u0641\u0648\u0631\u064a \u0644\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629 \u0645\u0639 \u0627\u0644\u062a\u0642\u064a\u064a\u0645\n"
+    "\u2022 /gamma TSLA \u0645\u0633\u062a\u0648\u064a\u0627\u062a \u0627\u0644\u062c\u0627\u0645\u0627 \u0648\u0627\u0644\u062c\u062f\u0631\u0627\u0646\n"
     "\u2022 /watch \u0639\u0631\u0636 \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629\n"
     "\u2022 /help \u0647\u0630\u064a \u0627\u0644\u0631\u0633\u0627\u0644\u0629\n\n"
     f"\u0627\u0644\u0641\u062d\u0635 \u0627\u0644\u062a\u0644\u0642\u0627\u0626\u064a \u0643\u0644 {SCAN_INTERVAL // 60} \u062f\u0642\u064a\u0642\u0629 \u0623\u062b\u0646\u0627\u0621 \u062c\u0644\u0633\u0629 \u0627\u0644\u0633\u0648\u0642 \u0627\u0644\u0623\u0645\u0631\u064a\u0643\u064a."
@@ -619,6 +745,10 @@ def handle_update(update):
         cmd = text.split()[0].split("@")[0].lower()
         if cmd in ("/start", "/help"):
             tg_send(chat_id, HELP)
+        elif cmd == "/gamma":
+            parts = text.split()
+            tg_send(chat_id, "\u23f3 \u0623\u062d\u0633\u0628 \u0627\u0644\u062c\u0627\u0645\u0627...")
+            tg_send(chat_id, gamma_report(parts[1] if len(parts) > 1 else ""))
         elif cmd == "/watch":
             tg_send(chat_id, "\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629:\n" + ", ".join(WATCHLIST))
         elif cmd == "/scan":
