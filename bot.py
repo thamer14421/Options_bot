@@ -1,9 +1,7 @@
 import os
+import time
 import requests
 from datetime import datetime, timedelta
-from flask import Flask, request
-
-app = Flask(__name__)
 
 TOKEN = "9192415351:AAGpYxc-tm58spY0ZsAKetX8SkTZ7jVwdik"
 
@@ -107,7 +105,7 @@ def generate_confirmed_signal(ticker_name):
         target_1 = round(price * 1.015, 2)
         target_2 = round(price * 1.03, 2)
         stop_loss = round(price * 0.99, 2)
-        strat_note = "📌 **استراتيجية العقد:** الزخم الشرائي يدعم كسر المقاومة نحو الأعلى."
+        strat_note = "📌 **استراتيجية العقد:** الزخم الشرائي يدعم صعود السهم واختراق الأهداف."
     else:
         emoji = "🔴 **شراء هبوط (PUT)**"
         strike_price = round(price * 0.99, 1)
@@ -117,7 +115,7 @@ def generate_confirmed_signal(ticker_name):
         strat_note = "📌 **استراتيجية العقد:** الضغط البيعي واستمرار التداول تحت المتوسط يرجح الهبوط."
 
     message = (
-        f"🎯 **تحليل صفقات الأوبشن الاحترافي ({ticker})**\n"
+        f"🎯 **تحليل صفقات الأوبشن الاستراتيجي ({ticker})**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"💰 **السعر اللحظي:** `${price}` | 📉 **المتوسط (SMA20):** `${analysis['sma']}`\n"
         f"📊 **مؤشر القوة RSI:** `{analysis['rsi']}`\n"
@@ -133,7 +131,7 @@ def generate_confirmed_signal(ticker_name):
         f"🚀 **الهدف الثاني:** `${target_2}`\n"
         f"🛡️ **وقف الخسارة:** `${stop_loss}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ *نظام التحليل الفني المتقدم - دقة استراتيجية عالية!*"
+        f"⚡ *نظام الاستطلاع المباشر - أداء دقيق ومستقر!*"
     )
     return message
 
@@ -146,31 +144,34 @@ def send_telegram_message(text, target_chat_id):
     }
     requests.post(url, json=payload)
 
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    json_data = request.get_json()
-    if json_data and "message" in json_data:
-        message = json_data["message"]
-        if "text" in message:
-            user_text = message["text"].strip()
-            user_chat_id = message["chat"]["id"]
+def run_polling():
+    """نظام الاستطلاع المباشر (Polling) بدون أي ويب هوك"""
+    print("Bot started polling successfully...")
+    offset = 0
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={offset}&timeout=30"
+            response = requests.get(url, timeout=35).json()
             
-            if user_text.startswith("/start"):
-                welcome_msg = (
-                    "👋 **أهلاً بك في بوت تحليل صفقات الأوبشن الاستراتيجي!**\n\n"
-                    "أرسل رمز السهم (مثل: `TSLA`, `NVDA`, `SPY`) لتحصل على تحليل استراتيجي متكامل يدعم قرارك (CALL / PUT) مع الأهداف والسترايك بدقة. 🚀"
-                )
-                send_telegram_message(welcome_msg, user_chat_id)
-            elif not user_text.startswith("/"):
-                reply = generate_confirmed_signal(user_text)
-                send_telegram_message(reply, user_chat_id)
-                
-    return "OK", 200
-
-@app.route('/')
-def home():
-    return "Strategic Options Bot is Active & Running 24/7!"
+            if "result" in response:
+                for update in response["result"]:
+                    offset = update["update_id"] + 1
+                    if "message" in update and "text" in update["message"]:
+                        user_text = update["message"]["text"].strip()
+                        chat_id = update["message"]["chat"]["id"]
+                        
+                        if user_text.startswith("/start"):
+                            welcome_msg = (
+                                "👋 **أهلاً بك في بوت تحليل صفقات الأوبشن الاستراتيجي!**\n\n"
+                                "أرسل رمز السهم (مثل: `TSLA`, `NVDA`, `SPY`) لتحصل على تحليل استراتيجي متكامل يدعم قرارك (CALL / PUT) مع الأهداف والسترايك بدقة. 🚀"
+                            )
+                            send_telegram_message(welcome_msg, chat_id)
+                        elif not user_text.startswith("/"):
+                            reply = generate_confirmed_signal(user_text)
+                            send_telegram_message(reply, chat_id)
+        except Exception as e:
+            print(f"Polling error: {e}")
+            time.sleep(3)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    run_polling()
