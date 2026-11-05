@@ -92,6 +92,7 @@ ATR_TARGET = float(_env("ATR_TARGET", "3.0"))
 GEX_EXPIRIES = int(_env("GEX_EXPIRIES", "4"))
 GEX_MAX_DTE = int(_env("GEX_MAX_DTE", "45"))
 RISK_FREE = 0.04
+HOLD_DAYS = int(_env("HOLD_DAYS", "5"))
 
 API = f"https://api.telegram.org/bot{TOKEN}"
 NY = ZoneInfo("America/New_York")
@@ -465,42 +466,160 @@ def compute_gex(t, price, fallback_iv=None):
     }
 
 
-def pick_contract(t, side, price):
-    """Pick a liquid near-the-money contract between MIN_DTE and MAX_DTE from the real chain."""
+def _norm_cdf(x):
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def _bs_d1(S, K, T, sigma):
+    return (math.log(S / K) + (RISK_FREE + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+
+
+def _bs_price(S, K, T, sigma, is_call):
+    if T <= 0 or sigma <= 0:
+        return max(S - K, 0.0) if is_call else max(K - S, 0.0)
+    d1 = _bs_d1(S, K, T, sigma)
+    d2 = d1 - sigma * math.sqrt(T)
+    disc = K * math.exp(-RISK_FREE * T)
+    if is_call:
+        return S * _norm_cdf(d1) - disc * _norm_cdf(d2)
+    return disc * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+
+
+def _bs_delta(S, K, T, sigma, is_call):
+    d1 = _bs_d1(S, K, T, sigma)
+    return _norm_cdf(d1) if is_call else _norm_cdf(d1) - 1
+
+
+def _implied_vol(target, S, K, T, is_call):
+    """Back out IV from an option mid price (bisection). Used when Yahoo returns a missing/zero IV."""
+    intrinsic = max(S - K, 0.0) if is_call else max(K - S, 0.0)
+    if T <= 0 or target <= intrinsic:
+        return None
+    lo, hi = 0.05, 5.0
+    if _bs_price(S, K, T, hi, is_call) < target or _bs_price(S, K, T, lo, is_call) > target:
+        return None
+    for _ in range(50):
+        mid = (lo + hi) / 2
+        if _bs_price(S, K, T, mid, is_call) > target:
+            hi = mid
+        else:
+            lo = mid
+    return (lo + hi) / 2
+
+
+def next_earnings(t):
+    try:
+        cal = t.calendar
+        dates = cal.get("Earnings Date") or []
+        today = datetime.now(NY).date()
+        clean = [d.date() if isinstance(d, datetime) else d for d in dates]
+        future = sorted(d for d in clean if d >= today)
+        return future[0] if future else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def cap_targets(plan, side, gex, price):
+    """Pull the final target back to the gamma wall when the wall sits between entry and target."""
+    if not gex:
+        return
+    risk = abs(price - plan["stop"])
+    if side == "CALL":
+        wall = gex["call_wall"]
+        if wall and price < wall < plan["t2"]:
+            plan["t2"] = wall
+            plan["t1"] = min(plan["t1"], price + (wall - price) / 2)
+            plan["note"] = f"\u0647\u062f\u0641 2 \u0645\u062e\u0641\u0651\u0636 \u0625\u0644\u0649 ${wall:g} \u0644\u0623\u0646 \u062c\u062f\u0627\u0631 CALL (\u0645\u0642\u0627\u0648\u0645\u0629 \u062c\u0627\u0645\u0627) \u0639\u0646\u062f\u0647."
+    else:
+        wall = gex["put_wall"]
+        if wall and plan["t2"] < wall < price:
+            plan["t2"] = wall
+            plan["t1"] = max(plan["t1"], price - (price - wall) / 2)
+            plan["note"] = f"\u0647\u062f\u0641 2 \u0645\u062e\u0641\u0651\u0636 \u0625\u0644\u0649 ${wall:g} \u0644\u0623\u0646 \u062c\u062f\u0627\u0631 PUT (\u062f\u0639\u0645 \u062c\u0627\u0645\u0627) \u0639\u0646\u062f\u0647."
+    if risk > 0:
+        plan["rr"] = abs(plan["t2"] - price) / risk
+
+
+def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
+    """Price every liquid contract at target 1 / target 2 / stop and rank by gain-to-loss on the premium."""
     today = datetime.now(NY).date()
+    is_call = side == "CALL"
+    positive_gamma = bool(gex and gex["net"] > 0)
+    lo_d, hi_d = (0.45, 0.80) if positive_gamma else (0.35, 0.70)
+    min_dte = max(MIN_DTE, HOLD_DAYS + 3)
+    cands, blocked, used = [], False, 0
     for exp in t.options:
-        dte = (date.fromisoformat(exp) - today).days
-        if dte < MIN_DTE:
+        exp_d = date.fromisoformat(exp)
+        dte = (exp_d - today).days
+        if dte < min_dte:
             continue
         if dte > MAX_DTE:
+            break
+        if earn and exp_d >= earn:
+            blocked = True
+            continue
+        if used >= 5:
             break
         try:
             chain = t.option_chain(exp)
         except Exception:  # noqa: BLE001
             continue
-        df = chain.calls if side == "CALL" else chain.puts
-        df = df[(df["bid"] > 0) & (df["ask"] > 0) & (df["openInterest"] >= 100)]
-        if df.empty:
-            continue
-        row = df.loc[(df["strike"] - price).abs().idxmin()]
-        bid, ask = float(row["bid"]), float(row["ask"])
-        mid = (bid + ask) / 2
-        spread = (ask - bid) / mid if mid > 0 else 1.0
-        if spread > MAX_SPREAD:
-            continue
-        return {
-            "expiry": exp,
-            "dte": dte,
-            "strike": float(row["strike"]),
-            "bid": bid,
-            "ask": ask,
-            "spread": spread,
-            "iv": _num(row.get("impliedVolatility")),
-            "oi": int(_num(row["openInterest"])),
-            "volume": int(_num(row.get("volume"))),
-            "side": side,
-        }
-    return None
+        used += 1
+        df = chain.calls if is_call else chain.puts
+        for row in df.itertuples():
+            k, bid, ask, oi = _num(row.strike), _num(row.bid), _num(row.ask), _num(row.openInterest)
+            if bid <= 0 or ask <= 0 or oi < 100 or abs(k - price) / price > 0.06:
+                continue
+            mid = (bid + ask) / 2
+            spread = (ask - bid) / mid
+            if spread > MAX_SPREAD:
+                continue
+            tau = dte / 365.0
+            iv = _num(row.impliedVolatility)
+            est_iv = False
+            if not (0.05 <= iv <= 5.0):
+                iv, est_iv = (_implied_vol(mid, price, k, tau, is_call) or fallback_iv), True
+            if not iv or not (0.05 <= iv <= 5.0):
+                continue
+            hold = min(HOLD_DAYS, dte - 1) / 365.0
+            delta = _bs_delta(price, k, tau, iv, is_call)
+            if not (lo_d <= abs(delta) <= hi_d):
+                continue
+            v1 = _bs_price(plan["t1"], k, tau - hold, iv, is_call)
+            v2 = _bs_price(plan["t2"], k, tau - hold, iv, is_call)
+            vs = _bs_price(plan["stop"], k, tau - hold, iv, is_call)
+            gain1, gain2 = (v1 - ask) / ask, (v2 - ask) / ask
+            loss = max((ask - vs) / ask, 0.05)
+            if gain1 <= 0:
+                continue
+            cands.append(
+                {
+                    "side": side, "expiry": exp, "dte": dte, "strike": k, "bid": bid, "ask": ask,
+                    "spread": spread, "iv": iv, "est_iv": est_iv, "delta": delta, "oi": int(oi),
+                    "volume": int(_num(getattr(row, "volume", 0))), "gain1": gain1, "gain2": gain2,
+                    "loss": loss, "score": gain1 / loss,
+                }
+            )
+    cands.sort(key=lambda c: c["score"], reverse=True)
+    top = cands[:3]
+    if top:
+        b0 = top[0]
+        reasons = [
+            f"{b0['dte']} \u064a\u0648\u0645: \u064a\u0643\u0641\u064a \u0644\u0648\u0635\u0648\u0644 \u0627\u0644\u0647\u062f\u0641 (~{HOLD_DAYS} \u0623\u064a\u0627\u0645) \u0645\u0639 \u0647\u0627\u0645\u0634 \u0642\u0628\u0644 \u0645\u0627 \u064a\u062a\u0622\u0643\u0644 \u0627\u0644\u0648\u0642\u062a",
+            f"\u0623\u0641\u0636\u0644 \u0646\u0633\u0628\u0629 \u0639\u0627\u0626\u062f/\u062e\u0633\u0627\u0631\u0629 \u062a\u0642\u062f\u064a\u0631\u064a\u0629 \u0639\u0644\u0649 \u0627\u0644\u0642\u0633\u0637 \u0628\u064a\u0646 {len(cands)} \u0639\u0642\u062f \u0633\u0627\u0626\u0644 (\u0639\u0646\u062f \u0647\u062f\u0641 2: 1:{b0['gain2'] / b0['loss']:.1f})",
+        ]
+        if earn:
+            reasons.append(f"\u064a\u0646\u062a\u0647\u064a \u0642\u0628\u0644 \u0625\u0639\u0644\u0627\u0646 \u0627\u0644\u0623\u0631\u0628\u0627\u062d ({earn})")
+        if gex:
+            reasons.append(
+                "\u0627\u0644\u062c\u0627\u0645\u0627 \u0645\u0648\u062c\u0628\u0629 (\u062d\u0631\u0643\u0629 \u0623\u0647\u062f\u0623)\u060c \u0641\u0627\u062e\u062a\u0631\u062a \u062f\u0644\u062a\u0627 \u0623\u0639\u0644\u0649 \u0648\u0623\u0642\u0631\u0628 \u0644\u0644\u0633\u0639\u0631"
+                if positive_gamma
+                else "\u0627\u0644\u062c\u0627\u0645\u0627 \u0633\u0627\u0644\u0628\u0629 (\u062d\u0631\u0643\u0629 \u0623\u0643\u0628\u0631 \u0645\u062d\u062a\u0645\u0644\u0629)\u060c \u0641\u0633\u0645\u062d\u062a \u0628\u062f\u0644\u062a\u0627 \u0623\u0642\u0644"
+            )
+        if plan.get("note"):
+            reasons.append("\u0627\u0644\u0623\u0647\u062f\u0627\u0641 \u0645\u062d\u0633\u0648\u0628\u0629 \u0628\u0639\u062f \u0636\u0628\u0637\u0647\u0627 \u0639\u0644\u0649 \u062c\u062f\u0627\u0631 \u0627\u0644\u062c\u0627\u0645\u0627")
+        b0["reasons"] = reasons
+    return {"best": top[0] if top else None, "candidates": top, "blocked_by_earnings": blocked}
 
 
 def earnings_in_window(t, until_iso):
@@ -651,10 +770,15 @@ def evaluate(sym, flow_hits=None, full=False):
             "t2": p + sign * ATR_TARGET * atr,
             "rr": ATR_TARGET / ATR_STOP,
         }
+        cap_targets(out["plan"], side, gex, p)
         try:
-            out["contract"] = pick_contract(t, side, p)
-            if out["contract"]:
-                out["earnings"] = earnings_in_window(t, out["contract"]["expiry"])
+            earn = next_earnings(t)
+            out["next_earnings"] = earn
+            picks = pick_contracts(t, side, p, out["plan"], _realized_vol(t), earn, gex)
+            out["alternatives"] = picks["candidates"]
+            out["contract"] = picks["best"]
+            if picks["blocked_by_earnings"] and out["contract"] is None:
+                out["earnings"] = earn
         except Exception as e:  # noqa: BLE001
             log.warning("contract pick failed %s: %s", sym, type(e).__name__)
     if full:
@@ -994,6 +1118,13 @@ def build_confirmation(ev):
         checks.append(("\u2753", "\u0645\u0627 \u0644\u0642\u064a\u062a \u0639\u0642\u062f \u0633\u064a\u0648\u0644\u062a\u0647 \u0645\u0646\u0627\u0633\u0628\u0629 \u0627\u0644\u062d\u064a\u0646"))
         waits.append("\u0639\u0642\u062f \u0645\u0646\u0627\u0633\u0628")
 
+    plan_ = ev.get("plan")
+    if plan_ and plan_["rr"] < 1.5:
+        checks.append(("\u274c", f"\u0627\u0644\u0639\u0627\u0626\u062f/\u0627\u0644\u0645\u062e\u0627\u0637\u0631\u0629 1:{plan_['rr']:.1f} \u0636\u0639\u064a\u0641 \u0628\u0639\u062f \u0636\u0628\u0637 \u0627\u0644\u0647\u062f\u0641 \u0639\u0644\u0649 \u0627\u0644\u062c\u0627\u0645\u0627 (\u0627\u0644\u0645\u0637\u0644\u0648\u0628 1.5 \u0623\u0648 \u0623\u0643\u062b\u0631)"))
+        conflicts.append("\u0627\u0644\u0639\u0627\u0626\u062f \u0636\u0639\u064a\u0641")
+    elif plan_:
+        checks.append(("\u2705", f"\u0627\u0644\u0639\u0627\u0626\u062f/\u0627\u0644\u0645\u062e\u0627\u0637\u0631\u0629 1:{plan_['rr']:.1f}"))
+
     if ev.get("earnings"):
         checks.append(("\u274c", f"\u0625\u0639\u0644\u0627\u0646 \u0623\u0631\u0628\u0627\u062d \u0628\u062a\u0627\u0631\u064a\u062e {ev['earnings']} \u0636\u0645\u0646 \u0641\u062a\u0631\u0629 \u0627\u0644\u0635\u0641\u0642\u0629"))
         conflicts.append("\u0623\u0631\u0628\u0627\u062d \u0642\u0631\u064a\u0628\u0629")
@@ -1018,6 +1149,38 @@ def build_confirmation(ev):
         verdict = f"\u2705 \u062f\u062e\u0648\u0644 \u0645\u0624\u0643\u062f {side}"
     return {"verdict": verdict, "checks": checks, "conflicts": conflicts, "waits": waits,
             "confirmed": not conflicts and not waits}
+
+
+def format_contract(ev):
+    ct = ev["contract"]
+    exp = date.fromisoformat(ct["expiry"])
+    lines = [
+        "\U0001f4dd \u0627\u0644\u0639\u0642\u062f \u0627\u0644\u0645\u0641\u0636\u0644 (\u0645\u0646 \u0627\u0644\u0633\u0644\u0633\u0644\u0629 \u0627\u0644\u062d\u0642\u064a\u0642\u064a\u0629):",
+        f"{ev['symbol']} {ct['side']} {ct['strike']:g}",
+        f"\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0627\u0646\u062a\u0647\u0627\u0621: {ct['expiry']} ({AR_DAYS[exp.weekday()]}) \u0628\u0639\u062f {ct['dte']} \u064a\u0648\u0645",
+        f"Bid/Ask: ${ct['bid']:.2f}/${ct['ask']:.2f} | \u0633\u0628\u0631\u064a\u062f {ct['spread'] * 100:.1f}%",
+        f"IV: {ct['iv'] * 100:.0f}%{' (\u0645\u0642\u062f\u0651\u0631)' if ct.get('est_iv') else ''} | \u062f\u0644\u062a\u0627: {abs(ct['delta']):.2f} | "
+        f"OI: {ct['oi']:,} | \u062d\u062c\u0645 \u0627\u0644\u064a\u0648\u0645: {ct['volume']:,}",
+        f"\u062a\u0642\u062f\u064a\u0631 \u0627\u0644\u0631\u0628\u062d \u0639\u0646\u062f \u0647\u062f\u0641 1: {ct['gain1'] * 100:+.0f}% | \u0639\u0646\u062f \u0647\u062f\u0641 2: {ct['gain2'] * 100:+.0f}% | "
+        f"\u0627\u0644\u062e\u0633\u0627\u0631\u0629 \u0639\u0646\u062f \u0648\u0642\u0641 \u0627\u0644\u0633\u0647\u0645: -{ct['loss'] * 100:.0f}%",
+        "\u0644\u064a\u0634 \u0647\u0630\u0627 \u0627\u0644\u062a\u0627\u0631\u064a\u062e \u0648\u0627\u0644\u0633\u062a\u0631\u0627\u064a\u0643\u061f",
+    ]
+    lines += [f"\u2022 {r}" for r in ct.get("reasons", [])]
+    alts = ev.get("alternatives") or []
+    if len(alts) > 1:
+        lines.append("\u0628\u062f\u0627\u0626\u0644:")
+        for a in alts[1:3]:
+            lines.append(
+                f"\u2022 {a['strike']:g} \u0627\u0646\u062a\u0647\u0627\u0621 {a['expiry']} ({a['dte']} \u064a\u0648\u0645) | ask ${a['ask']:.2f} | "
+                f"\u0647\u062f\u0641 1: {a['gain1'] * 100:+.0f}% | \u0648\u0642\u0641: -{a['loss'] * 100:.0f}%"
+            )
+    if ev.get("next_earnings"):
+        lines.append(f"\u0623\u0642\u0631\u0628 \u0625\u0639\u0644\u0627\u0646 \u0623\u0631\u0628\u0627\u062d: {ev['next_earnings']}")
+    lines.append(
+        f"\u0627\u0644\u062a\u0642\u062f\u064a\u0631\u0627\u062a \u062a\u0641\u062a\u0631\u0636 \u062b\u0628\u0627\u062a IV \u0648\u0648\u0635\u0648\u0644 \u0627\u0644\u0633\u0647\u0645 \u0644\u0644\u0647\u062f\u0641 \u062e\u0644\u0627\u0644 {HOLD_DAYS} \u0623\u064a\u0627\u0645\u060c \u0648\u0647\u064a \u062a\u0642\u0631\u064a\u0628 \u0648\u0644\u064a\u0633\u062a \u0648\u0639\u062f. "
+        "\u0644\u0627 \u062a\u062a\u0631\u0643\u0647 \u0644\u0622\u062e\u0631 \u064a\u0648\u0645 \u0642\u0628\u0644 \u0627\u0644\u0627\u0646\u062a\u0647\u0627\u0621."
+    )
+    return "\n".join(lines)
 
 
 def format_full(ev, flow):
@@ -1051,13 +1214,10 @@ def format_full(ev, flow):
             f"\u0647\u062f\u0641 2: ${plan['t2']:.2f}\n"
             f"\u0627\u0644\u0645\u062e\u0627\u0637\u0631\u0629:\u0627\u0644\u0639\u0627\u0626\u062f = 1:{plan['rr']:.1f}"
         )
+        if plan.get("note"):
+            lines.append("\u26a0\ufe0f " + plan["note"])
         if ct:
-            lines.append(
-                f"\n\U0001f4dd \u0639\u0642\u062f \u0645\u0642\u062a\u0631\u062d:\n{ev['symbol']} {ct['side']} {ct['strike']:g}  \u0627\u0646\u062a\u0647\u0627\u0621 {ct['expiry']} ({ct['dte']} \u064a\u0648\u0645)\n"
-                f"Bid/Ask: ${ct['bid']:.2f}/${ct['ask']:.2f} | \u0633\u0628\u0631\u064a\u062f {ct['spread'] * 100:.1f}%\n"
-                f"IV: {ct['iv'] * 100:.0f}% | OI: {ct['oi']:,} | \u062d\u062c\u0645 \u0627\u0644\u064a\u0648\u0645: {ct['volume']:,}\n"
-                "\u0644\u0627 \u062a\u062a\u0631\u0643\u0647 \u0644\u0622\u062e\u0631 \u064a\u0648\u0645 \u0642\u0628\u0644 \u0627\u0644\u0627\u0646\u062a\u0647\u0627\u0621\u060c \u0644\u0623\u0646 \u0642\u064a\u0645\u0629 \u0627\u0644\u0639\u0642\u062f \u062a\u062a\u0622\u0643\u0644 \u0628\u0633\u0631\u0639\u0629."
-            )
+            lines.append("\n" + format_contract(ev))
 
     lines.append("\n" + format_news(ev.get("news")))
     if ev.get("gex"):
