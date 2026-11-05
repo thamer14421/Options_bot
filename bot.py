@@ -37,7 +37,7 @@ import os
 import re
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -165,7 +165,9 @@ def _num(x, default=0.0):
         return default
 
 
-CACHE_TTL = int(_env("CACHE_TTL_SEC", "300"))
+CACHE_TTL = int(_env("CACHE_TTL_SEC", "90"))
+NEWS_HOURS = int(_env("NEWS_HOURS", "72"))
+FRESH_MAX_MIN = int(_env("FRESH_MAX_MIN", "20"))
 
 
 def _with_retry(fn):
@@ -202,6 +204,10 @@ class CachedTicker:
     @property
     def calendar(self):
         return self._get("calendar", lambda: self._t.calendar)
+
+    @property
+    def news(self):
+        return self._get("news", lambda: self._t.news)
 
     def history(self, period="1d", interval="1d"):
         return self._get(("h", period, interval), lambda: self._t.history(period=period, interval=interval))
@@ -377,10 +383,23 @@ def _bs_gamma(S, K, T, sigma):
     return pdf / (S * sigma * math.sqrt(T))
 
 
-def compute_gex(t, price):
-    """Estimate dealer gamma exposure from open interest (dealers assumed long calls / short puts)."""
+def _realized_vol(t):
+    try:
+        d = t.history(period="1y", interval="1d")["Close"].dropna()
+        v = float(d.pct_change().tail(30).std() * math.sqrt(252))
+        return v if 0.05 <= v <= 5.0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def compute_gex(t, price, fallback_iv=None):
+    """Estimate dealer gamma exposure from open interest (dealers assumed long calls / short puts).
+
+    When Yahoo returns a missing/zero IV (typical after the close) the expiry's median IV is used,
+    and if there is none, the stock's realized volatility. The share of estimated contracts is returned.
+    """
     today = datetime.now(NY).date()
-    opts, used = [], 0
+    opts, used, est, total = [], 0, 0, 0
     for exp in t.options:
         dte = (date.fromisoformat(exp) - today).days
         if dte < 0:
@@ -393,12 +412,25 @@ def compute_gex(t, price):
             continue
         used += 1
         tau = max(dte, 0.5) / 365.0
+        rows = []
         for sign, df in ((1, chain.calls), (-1, chain.puts)):
             for row in df.itertuples():
                 k, oi, iv = _num(row.strike), _num(row.openInterest), _num(row.impliedVolatility)
-                if oi <= 0 or iv < 0.05 or not (price * 0.7 <= k <= price * 1.3):
+                if oi <= 0 or not (price * 0.7 <= k <= price * 1.3):
                     continue
-                opts.append((sign, k, oi, iv, tau))
+                rows.append((sign, k, oi, iv))
+        valid = sorted(iv for _, _, _, iv in rows if 0.05 <= iv <= 5.0)
+        med = valid[len(valid) // 2] if valid else None
+        for sign, k, oi, iv in rows:
+            estimated = False
+            if not (0.05 <= iv <= 5.0):
+                iv = med or fallback_iv
+                estimated = True
+            if not iv or not (0.05 <= iv <= 5.0):
+                continue
+            total += 1
+            est += 1 if estimated else 0
+            opts.append((sign, k, oi, iv, tau))
     if not opts:
         return None
 
@@ -424,7 +456,13 @@ def compute_gex(t, price):
         prev_s, prev_v = spot, v
     flip = min(crossings, key=lambda c: abs(c - price)) if crossings else None
 
-    return {"net": net_at(price), "flip": flip, "call_wall": call_wall, "put_wall": put_wall}
+    return {
+        "net": net_at(price),
+        "flip": flip,
+        "call_wall": call_wall,
+        "put_wall": put_wall,
+        "est_frac": (est / total) if total else 0.0,
+    }
 
 
 def pick_contract(t, side, price):
@@ -480,7 +518,7 @@ def earnings_in_window(t, until_iso):
     return None
 
 
-def evaluate(sym, flow_hits=None):
+def evaluate(sym, flow_hits=None, full=False):
     """Score a ticker and build a trade plan. Returns None when data is missing."""
     t = get_ticker(sym)
     tech = technicals(t)
@@ -567,7 +605,7 @@ def evaluate(sym, flow_hits=None):
 
     gex = None
     try:
-        gex = compute_gex(t, p)
+        gex = compute_gex(t, p, _realized_vol(t))
     except Exception as e:  # noqa: BLE001
         log.warning("gex failed %s: %s", sym, type(e).__name__)
     gex_warn = None
@@ -619,6 +657,16 @@ def evaluate(sym, flow_hits=None):
                 out["earnings"] = earnings_in_window(t, out["contract"]["expiry"])
         except Exception as e:  # noqa: BLE001
             log.warning("contract pick failed %s: %s", sym, type(e).__name__)
+    if full:
+        out["quote"] = latest_quote(t)
+        try:
+            out["news"] = news_sentiment(t)
+        except Exception as e:  # noqa: BLE001
+            log.warning("news failed %s: %s", sym, type(e).__name__)
+            out["news"] = None
+        if out["contract"] is None and out["earnings"] is None:
+            out["earnings"] = earnings_in_window(t, (datetime.now(NY).date() + timedelta(days=14)).isoformat())
+        out["confirm"] = build_confirmation(out)
     return out
 
 
@@ -690,7 +738,9 @@ def format_gex(g, price):
         lines.append(f"\u062c\u062f\u0627\u0631 CALL (\u0645\u0642\u0627\u0648\u0645\u0629 \u0645\u062d\u062a\u0645\u0644\u0629): ${g['call_wall']:g}")
     if g["put_wall"]:
         lines.append(f"\u062c\u062f\u0627\u0631 PUT (\u062f\u0639\u0645 \u0645\u062d\u062a\u0645\u0644): ${g['put_wall']:g}")
-    lines.append("\u062a\u0642\u062f\u064a\u0631 \u062a\u0642\u0631\u064a\u0628\u064a \u0645\u0646 \u0628\u064a\u0627\u0646\u0627\u062a Yahoo\u060c \u0648\u0644\u064a\u0633 \u0631\u0642\u0645\u0627\u064b \u0631\u0633\u0645\u064a\u0627\u064b.")
+    if g.get("est_frac", 0) > 0.3:
+        lines.append(f"\u26a0\ufe0f {g['est_frac'] * 100:.0f}% \u0645\u0646 \u0627\u0644\u0639\u0642\u0648\u062f IV \u0645\u0642\u062f\u0651\u0631 (\u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631 \u0623\u0648 \u0628\u064a\u0627\u0646\u0627\u062a Yahoo \u0646\u0627\u0642\u0635\u0629)\u060c \u0641\u0627\u0644\u0623\u0631\u0642\u0627\u0645 \u0623\u0642\u0644 \u062f\u0642\u0629.")
+    lines.append("\u062a\u0642\u062f\u064a\u0631 \u062a\u0642\u0631\u064a\u0628\u064a \u0645\u0646 Yahoo\u060c \u0648\u0627\u0644\u0640 OI \u064a\u062a\u062d\u062f\u062b \u0645\u0631\u0629 \u0628\u0627\u0644\u064a\u0648\u0645 \u0642\u0628\u0644 \u0627\u0644\u0627\u0641\u062a\u062a\u0627\u062d.")
     return "\n".join(lines)
 
 
@@ -735,43 +785,328 @@ def format_evaluation(ev):
     return "\n".join(lines)
 
 
+ALIASES = {
+    "TESLA": "TSLA", "APPLE": "AAPL", "NVIDIA": "NVDA", "AMAZON": "AMZN", "MICROSOFT": "MSFT",
+    "GOOGLE": "GOOGL", "ALPHABET": "GOOGL", "FACEBOOK": "META", "NETFLIX": "NFLX", "INTEL": "INTC",
+    "PALANTIR": "PLTR", "COINBASE": "COIN",
+    "\u062a\u0633\u0644\u0627": "TSLA", "\u0627\u0628\u0644": "AAPL", "\u0623\u0628\u0644": "AAPL", "\u0627\u0646\u0641\u064a\u062f\u064a\u0627": "NVDA", "\u0646\u0641\u064a\u062f\u064a\u0627": "NVDA",
+    "\u0627\u0645\u0627\u0632\u0648\u0646": "AMZN", "\u0623\u0645\u0627\u0632\u0648\u0646": "AMZN", "\u0645\u0627\u064a\u0643\u0631\u0648\u0633\u0648\u0641\u062a": "MSFT", "\u0642\u0648\u0642\u0644": "GOOGL", "\u062c\u0648\u062c\u0644": "GOOGL",
+    "\u0645\u064a\u062a\u0627": "META", "\u0646\u062a\u0641\u0644\u0643\u0633": "NFLX",
+}
+RIYADH = ZoneInfo("Asia/Riyadh")
+AR_DAYS = ["\u0627\u0644\u0627\u062b\u0646\u064a\u0646", "\u0627\u0644\u062b\u0644\u0627\u062b\u0627\u0621", "\u0627\u0644\u0623\u0631\u0628\u0639\u0627\u0621", "\u0627\u0644\u062e\u0645\u064a\u0633", "\u0627\u0644\u062c\u0645\u0639\u0629", "\u0627\u0644\u0633\u0628\u062a", "\u0627\u0644\u0623\u062d\u062f"]
+
+
+def _sym(raw):
+    s = (raw or "").strip().lstrip("$")
+    key = s.upper() if s.isascii() else s
+    s2 = ALIASES.get(key, s.upper())
+    return s2 if re.fullmatch(r"[A-Z][A-Z.\-]{0,5}", s2) else None
+
+
+# ---- news -------------------------------------------------------------------
+_POS = (
+    "beat beats tops surge surges soar soars jump jumps rally rallies record upgrade upgraded upgrades raises raised "
+    "outperform bullish strong growth profit profits approval approved partnership expands boost boosts breakthrough "
+    "gain gains buyback wins rebound rebounds optimistic accelerates exceeds exceeded climbs rises"
+).split()
+_NEG = (
+    "miss misses missed falls fall drops drop plunge plunges tumble tumbles slump slumps downgrade downgraded "
+    "downgrades cuts warning warns probe investigation lawsuit sues sued fine fined recall layoffs fraud bearish weak "
+    "decline declines loss losses delay delays halts ban bans tariff tariffs sanctions bankruptcy resigns selloff "
+    "slides sinks underperform antitrust concern concerns slowdown disappoints disappointing"
+).split()
+_POS_RE = re.compile(r"\b(" + "|".join(_POS) + r")\b", re.I)
+_NEG_RE = re.compile(r"\b(" + "|".join(_NEG) + r")\b", re.I)
+
+
+def _clamp(x, lo=-2, hi=2):
+    return max(lo, min(hi, x))
+
+
+def _headline_score(title, summary):
+    st = _clamp(len(set(w.lower() for w in _POS_RE.findall(title))) - len(set(w.lower() for w in _NEG_RE.findall(title))))
+    ss = _clamp(len(set(w.lower() for w in _POS_RE.findall(summary))) - len(set(w.lower() for w in _NEG_RE.findall(summary))))
+    return st + 0.5 * ss
+
+
+def _parse_news_item(it):
+    c = it.get("content") if isinstance(it.get("content"), dict) else it
+    title = (c.get("title") or "").strip()
+    if not title:
+        return None
+    summary = (c.get("summary") or c.get("description") or "").strip()
+    ts = None
+    pub = c.get("pubDate") or c.get("displayTime")
+    if pub:
+        try:
+            ts = datetime.fromisoformat(str(pub).replace("Z", "+00:00"))
+        except ValueError:
+            ts = None
+    if ts is None and it.get("providerPublishTime"):
+        try:
+            ts = datetime.fromtimestamp(int(it["providerPublishTime"]), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            ts = None
+    prov = ""
+    p = c.get("provider")
+    if isinstance(p, dict):
+        prov = p.get("displayName") or ""
+    prov = prov or c.get("publisher") or it.get("publisher") or ""
+    return {"title": title, "summary": summary, "ts": ts, "publisher": prov}
+
+
+def news_sentiment(t):
+    raw = t.news or []
+    now = datetime.now(timezone.utc)
+    items = []
+    for it in raw[:30]:
+        p = _parse_news_item(it)
+        if not p or p["ts"] is None:
+            continue
+        if p["ts"].tzinfo is None:
+            p["ts"] = p["ts"].replace(tzinfo=timezone.utc)
+        age_h = max((now - p["ts"]).total_seconds() / 3600, 0.0)
+        if age_h > NEWS_HOURS:
+            continue
+        s = _headline_score(p["title"], p["summary"][:300])
+        w = 1.0 if age_h <= 12 else (0.7 if age_h <= 36 else 0.4)
+        p.update(age_h=age_h, s=s, w=w)
+        items.append(p)
+    items.sort(key=lambda x: x["age_h"])
+    total = sum(x["s"] * x["w"] for x in items)
+    label = "positive" if total >= 1.5 else ("negative" if total <= -1.5 else "neutral")
+    return {"score": total, "label": label, "items": items, "count": len(items)}
+
+
+def format_news(nw):
+    lines = [f"\U0001f4f0 \u0627\u0644\u0623\u062e\u0628\u0627\u0631 (\u0622\u062e\u0631 {NEWS_HOURS} \u0633\u0627\u0639\u0629):"]
+    if nw is None:
+        lines.append("\u062a\u0639\u0630\u0651\u0631 \u062c\u0644\u0628 \u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u0627\u0644\u0622\u0646.")
+        return "\n".join(lines)
+    if nw["count"] == 0:
+        lines.append("\u0645\u0627 \u0641\u064a\u0647 \u0623\u062e\u0628\u0627\u0631 \u062d\u062f\u064a\u062b\u0629 \u0639\u0644\u0649 \u0627\u0644\u0633\u0647\u0645\u060c \u0641\u0627\u0644\u0642\u0631\u0627\u0631 \u0645\u0628\u0646\u064a \u0639\u0644\u0649 \u0627\u0644\u0641\u0646\u064a \u0648\u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0641\u0642\u0637.")
+        return "\n".join(lines)
+    lab = {"positive": "\u0625\u064a\u062c\u0627\u0628\u064a\u0629 \U0001f7e2", "negative": "\u0633\u0644\u0628\u064a\u0629 \U0001f534", "neutral": "\u0645\u062d\u0627\u064a\u062f\u0629 \u26aa"}[nw["label"]]
+    lines.append(f"\u0627\u0644\u0645\u064a\u0644 \u0627\u0644\u0639\u0627\u0645: {lab} ({nw['count']} \u062e\u0628\u0631)")
+    for it in nw["items"][:4]:
+        icon = "\U0001f7e2" if it["s"] >= 1 else ("\U0001f534" if it["s"] <= -1 else "\u26aa")
+        age = f"{int(it['age_h'])} \u0633" if it["age_h"] >= 1 else f"{int(it['age_h'] * 60)} \u062f"
+        title = it["title"] if len(it["title"]) <= 100 else it["title"][:97] + "..."
+        src_name = f" ({it['publisher']})" if it["publisher"] else ""
+        lines.append(f"{icon} \u0642\u0628\u0644 {age}: {title}{src_name}")
+    lines.append("\u0627\u0644\u062a\u0635\u0646\u064a\u0641 \u062a\u0644\u0642\u0627\u0626\u064a \u0628\u0627\u0644\u0643\u0644\u0645\u0627\u062a \u0627\u0644\u0645\u0641\u062a\u0627\u062d\u064a\u0629\u060c \u0627\u0642\u0631\u0623 \u0627\u0644\u0639\u0646\u0627\u0648\u064a\u0646 \u0628\u0646\u0641\u0633\u0643 \u0642\u0628\u0644 \u0627\u0644\u062f\u062e\u0648\u0644.")
+    return "\n".join(lines)
+
+
+# ---- fresh quote + entry window ---------------------------------------------
+def latest_quote(t):
+    try:
+        h = t.history(period="1d", interval="1m")
+        if h is None or h.empty:
+            return None
+        ts = h.index[-1]
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(NY)
+        age = max((pd.Timestamp.now(tz=NY) - ts).total_seconds() / 60, 0.0)
+        return {"price": float(h["Close"].iloc[-1]), "age_min": age, "ts": ts.to_pydatetime()}
+    except Exception as e:  # noqa: BLE001
+        log.warning("quote failed: %s", type(e).__name__)
+        return None
+
+
+def _fmt_riyadh(dt):
+    r = dt.astimezone(RIYADH)
+    return f"{AR_DAYS[r.weekday()]} {r:%Y-%m-%d} \u0627\u0644\u0633\u0627\u0639\u0629 {r:%H:%M} \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0631\u064a\u0627\u0636"
+
+
+def _next_session_start(now_ny):
+    d = now_ny.date()
+    open_t = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+    cand = d if (now_ny.weekday() < 5 and now_ny < open_t) else d + timedelta(days=1)
+    while cand.weekday() >= 5:
+        cand += timedelta(days=1)
+    return datetime(cand.year, cand.month, cand.day, 9, 30, tzinfo=NY)
+
+
+def entry_window_text():
+    now = datetime.now(NY)
+    if is_market_open():
+        start_ok = now.replace(hour=10, minute=0, second=0, microsecond=0)
+        end_ok = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        if now < start_ok:
+            return f"\u0627\u0644\u0633\u0648\u0642 \u0645\u0641\u062a\u0648\u062d \u0644\u0643\u0646 \u0623\u0648\u0644 30 \u062f\u0642\u064a\u0642\u0629 \u0645\u062a\u0642\u0644\u0628\u0629. \u0627\u0644\u0623\u0641\u0636\u0644 \u062a\u062f\u062e\u0644 \u0628\u0639\u062f {_fmt_riyadh(start_ok)}."
+        if now > end_ok:
+            return "\u0622\u062e\u0631 30 \u062f\u0642\u064a\u0642\u0629 \u0645\u0646 \u0627\u0644\u062c\u0644\u0633\u0629 \u0648\u062a\u0642\u0644\u0628\u0647\u0627 \u0639\u0627\u0644\u064a. \u0627\u0644\u0623\u0641\u0636\u0644 \u062a\u0646\u062a\u0638\u0631 \u0627\u0644\u062c\u0644\u0633\u0629 \u0627\u0644\u0642\u0627\u062f\u0645\u0629."
+        return f"\u0627\u0644\u062d\u064a\u0646 \u0636\u0645\u0646 \u0623\u0641\u0636\u0644 \u0646\u0627\u0641\u0630\u0629 \u062f\u062e\u0648\u0644 (\u062d\u062a\u0649 {_fmt_riyadh(end_ok)})."
+    nxt = _next_session_start(now)
+    best = nxt.replace(hour=10, minute=0)
+    return (
+        f"\u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631. \u0627\u0644\u062c\u0644\u0633\u0629 \u0627\u0644\u0642\u0627\u062f\u0645\u0629 \u062a\u0641\u062a\u062d {_fmt_riyadh(nxt)}\u060c \u0648\u0623\u0641\u0636\u0644 \u0648\u0642\u062a \u062f\u062e\u0648\u0644 \u0628\u0639\u062f {_fmt_riyadh(best)}.\n"
+        "\u0623\u0639\u062f \u0625\u0631\u0633\u0627\u0644 \u0631\u0645\u0632 \u0627\u0644\u0633\u0647\u0645 \u0648\u0642\u062a\u0647\u0627 \u0639\u0634\u0627\u0646 \u064a\u062a\u062d\u062f\u062b \u0627\u0644\u062a\u0623\u0643\u064a\u062f. (\u0644\u0627 \u0623\u062d\u0633\u0628 \u0625\u062c\u0627\u0632\u0627\u062a \u0627\u0644\u0628\u0648\u0631\u0635\u0629)"
+    )
+
+
+# ---- confirmation checklist --------------------------------------------------
+def build_confirmation(ev):
+    checks, conflicts, waits = [], [], []
+    side, score = ev["side"], ev["score"]
+
+    if ev["strong"]:
+        checks.append(("\u2705", f"\u0627\u0644\u062a\u0642\u064a\u064a\u0645 \u0627\u0644\u0641\u0646\u064a \u0642\u0648\u064a ({score:+d}/{MAX_SCORE}) \u0648\u0627\u0644\u062a\u0631\u0646\u062f \u064a\u0648\u0627\u0641\u0642 \u0627\u0644\u0627\u062a\u062c\u0627\u0647"))
+    elif ev["label"] == "\u0645\u062a\u0648\u0633\u0637\u0629":
+        checks.append(("\u274c", f"\u0627\u0644\u062a\u0642\u064a\u064a\u0645 \u0645\u062a\u0648\u0633\u0637 \u0641\u0642\u0637 ({score:+d}/{MAX_SCORE})\u060c \u0627\u0644\u0645\u0637\u0644\u0648\u0628 {STRONG_SCORE} \u0623\u0648 \u0623\u0643\u062b\u0631 \u0645\u0639 \u062a\u0631\u0646\u062f \u0648\u0627\u0636\u062d"))
+        conflicts.append("\u0627\u0644\u062a\u0642\u064a\u064a\u0645 \u0627\u0644\u0641\u0646\u064a \u0645\u0627 \u0648\u0635\u0644 \u0644\u0644\u0642\u0648\u064a")
+    else:
+        checks.append(("\u274c", f"\u0627\u0644\u0625\u0634\u0627\u0631\u0627\u062a \u0627\u0644\u0641\u0646\u064a\u0629 \u0645\u062d\u0627\u064a\u062f\u0629 ({score:+d}/{MAX_SCORE})"))
+        conflicts.append("\u0645\u0627 \u0641\u064a\u0647 \u0627\u062a\u062c\u0627\u0647 \u0648\u0627\u0636\u062d")
+
+    nw = ev.get("news")
+    if nw is None:
+        checks.append(("\u2753", "\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629 \u0627\u0644\u0622\u0646"))
+        waits.append("\u062c\u0644\u0628 \u0627\u0644\u0623\u062e\u0628\u0627\u0631")
+    elif nw["count"] == 0:
+        checks.append(("\u2705", "\u0645\u0627 \u0641\u064a\u0647 \u0623\u062e\u0628\u0627\u0631 \u062d\u062f\u064a\u062b\u0629 \u062a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647"))
+    else:
+        opposed = (side == "CALL" and nw["label"] == "negative") or (side == "PUT" and nw["label"] == "positive")
+        aligned = (side == "CALL" and nw["label"] == "positive") or (side == "PUT" and nw["label"] == "negative")
+        if opposed:
+            checks.append(("\u274c", "\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u062a\u0639\u0627\u0643\u0633 \u0627\u062a\u062c\u0627\u0647 \u0627\u0644\u0635\u0641\u0642\u0629"))
+            conflicts.append("\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u062a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647")
+        elif aligned:
+            checks.append(("\u2705", "\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u062a\u062f\u0639\u0645 \u0627\u062a\u062c\u0627\u0647 \u0627\u0644\u0635\u0641\u0642\u0629"))
+        else:
+            checks.append(("\u2705", "\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u0645\u062d\u0627\u064a\u062f\u0629 \u0648\u0645\u0627 \u062a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647"))
+
+    if ev.get("gex") is None:
+        checks.append(("\u2753", "\u0627\u0644\u062c\u0627\u0645\u0627 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629 (\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0646\u0627\u0642\u0635\u0629)"))
+        waits.append("\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u062c\u0627\u0645\u0627")
+    elif ev.get("gex_warn"):
+        checks.append(("\u274c", ev["gex_warn"]))
+        conflicts.append("\u0627\u0644\u062c\u0627\u0645\u0627 \u062a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647")
+    else:
+        checks.append(("\u2705", "\u0627\u0644\u062c\u0627\u0645\u0627: \u0645\u0627 \u0641\u064a\u0647 \u062c\u062f\u0627\u0631 \u0642\u0631\u064a\u0628 \u064a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647"))
+
+    ct = ev.get("contract")
+    if ct:
+        checks.append(("\u2705", f"\u0641\u064a\u0647 \u0639\u0642\u062f \u0633\u064a\u0648\u0644\u062a\u0647 \u062c\u064a\u062f\u0629 ({ct['dte']} \u064a\u0648\u0645\u060c \u0633\u0628\u0631\u064a\u062f {ct['spread'] * 100:.1f}%)"))
+    else:
+        checks.append(("\u2753", "\u0645\u0627 \u0644\u0642\u064a\u062a \u0639\u0642\u062f \u0633\u064a\u0648\u0644\u062a\u0647 \u0645\u0646\u0627\u0633\u0628\u0629 \u0627\u0644\u062d\u064a\u0646"))
+        waits.append("\u0639\u0642\u062f \u0645\u0646\u0627\u0633\u0628")
+
+    if ev.get("earnings"):
+        checks.append(("\u274c", f"\u0625\u0639\u0644\u0627\u0646 \u0623\u0631\u0628\u0627\u062d \u0628\u062a\u0627\u0631\u064a\u062e {ev['earnings']} \u0636\u0645\u0646 \u0641\u062a\u0631\u0629 \u0627\u0644\u0635\u0641\u0642\u0629"))
+        conflicts.append("\u0623\u0631\u0628\u0627\u062d \u0642\u0631\u064a\u0628\u0629")
+    else:
+        checks.append(("\u2705", "\u0645\u0627 \u0641\u064a\u0647 \u0625\u0639\u0644\u0627\u0646 \u0623\u0631\u0628\u0627\u062d \u0636\u0645\u0646 \u0641\u062a\u0631\u0629 \u0627\u0644\u0635\u0641\u0642\u0629"))
+
+    q = ev.get("quote")
+    if not is_market_open():
+        checks.append(("\u23f3", "\u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631\u060c \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0627\u0644\u0646\u0647\u0627\u0626\u064a \u064a\u0643\u0648\u0646 \u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u062c\u0644\u0633\u0629"))
+        waits.append("\u0641\u062a\u062d \u0627\u0644\u0633\u0648\u0642")
+    elif q and q["age_min"] <= FRESH_MAX_MIN:
+        checks.append(("\u2705", f"\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0633\u0639\u0631 \u062d\u062f\u064a\u062b\u0629 (\u0642\u0628\u0644 {int(q['age_min'])} \u062f)"))
+    else:
+        checks.append(("\u23f3", "\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0633\u0639\u0631 \u0645\u062a\u0623\u062e\u0631\u0629\u060c \u0623\u0639\u062f \u0627\u0644\u0625\u0631\u0633\u0627\u0644 \u0628\u0639\u062f \u062f\u0642\u064a\u0642\u0629"))
+        waits.append("\u062a\u062d\u062f\u064a\u062b \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a")
+
+    if conflicts:
+        verdict = "\u26d4 \u0644\u0627 \u062a\u062f\u062e\u0644 \u0627\u0644\u062d\u064a\u0646"
+    elif waits:
+        verdict = "\u23f3 \u0627\u0646\u062a\u0638\u0631 \u0627\u0644\u062a\u0623\u0643\u064a\u062f"
+    else:
+        verdict = f"\u2705 \u062f\u062e\u0648\u0644 \u0645\u0624\u0643\u062f {side}"
+    return {"verdict": verdict, "checks": checks, "conflicts": conflicts, "waits": waits,
+            "confirmed": not conflicts and not waits}
+
+
+def format_full(ev, flow):
+    c, q = ev["confirm"], ev.get("quote")
+    price = q["price"] if q else ev["price"]
+    head = f"\U0001f4ca {ev['symbol']}  ${price:.2f}"
+    if q:
+        r = q["ts"].astimezone(RIYADH)
+        if is_market_open():
+            head += f"\n\U0001f552 \u0622\u062e\u0631 \u062a\u062d\u062f\u064a\u062b \u0644\u0644\u0633\u0639\u0631: {r:%H:%M} \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0631\u064a\u0627\u0636 (\u0642\u0628\u0644 {int(q['age_min'])} \u062f)"
+        else:
+            head += f"\n\U0001f552 \u0633\u0639\u0631 \u0627\u0644\u0625\u063a\u0644\u0627\u0642: {r:%Y-%m-%d %H:%M} \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0631\u064a\u0627\u0636"
+    lines = [head, "", f"\u0627\u0644\u0642\u0631\u0627\u0631: {c['verdict']}",
+             "(\u0627\u0644\u062a\u0623\u0643\u064a\u062f = \u062a\u062d\u0642\u0642 \u0643\u0644 \u0627\u0644\u0634\u0631\u0648\u0637 \u062a\u062d\u062a\u060c \u0648\u0644\u064a\u0633 \u0636\u0645\u0627\u0646 \u0631\u0628\u062d)", "", "\u2714\ufe0f \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u062a\u0623\u0643\u064a\u062f:"]
+    lines += [f"{i} {t}" for i, t in c["checks"]]
+    if c["conflicts"]:
+        lines.append("\n\u0627\u0644\u0645\u0627\u0646\u0639: " + "\u060c ".join(c["conflicts"]))
+    elif c["waits"]:
+        lines.append("\n\u0627\u0644\u0628\u0627\u0642\u064a: " + "\u060c ".join(c["waits"]))
+
+    lines.append("\n\u23f0 \u0648\u0642\u062a \u0627\u0644\u062f\u062e\u0648\u0644:\n" + entry_window_text())
+
+    plan, ct = ev["plan"], ev["contract"]
+    if plan:
+        tag = "\U0001f3af \u0627\u0644\u062e\u0637\u0629" if c["confirmed"] else "\U0001f3af \u062e\u0637\u0629 \u0645\u0628\u062f\u0626\u064a\u0629 (\u063a\u064a\u0631 \u0645\u0624\u0643\u062f\u0629 \u0628\u0639\u062f)"
+        lines.append(
+            f"\n{tag} \u0639\u0644\u0649 \u0633\u0639\u0631 \u0627\u0644\u0633\u0647\u0645 (ATR):\n"
+            f"\u062f\u062e\u0648\u0644: ~${plan['entry']:.2f}\n"
+            f"\u0648\u0642\u0641 \u0627\u0644\u062e\u0633\u0627\u0631\u0629: ${plan['stop']:.2f}\n"
+            f"\u0647\u062f\u0641 1: ${plan['t1']:.2f}\n"
+            f"\u0647\u062f\u0641 2: ${plan['t2']:.2f}\n"
+            f"\u0627\u0644\u0645\u062e\u0627\u0637\u0631\u0629:\u0627\u0644\u0639\u0627\u0626\u062f = 1:{plan['rr']:.1f}"
+        )
+        if ct:
+            lines.append(
+                f"\n\U0001f4dd \u0639\u0642\u062f \u0645\u0642\u062a\u0631\u062d:\n{ev['symbol']} {ct['side']} {ct['strike']:g}  \u0627\u0646\u062a\u0647\u0627\u0621 {ct['expiry']} ({ct['dte']} \u064a\u0648\u0645)\n"
+                f"Bid/Ask: ${ct['bid']:.2f}/${ct['ask']:.2f} | \u0633\u0628\u0631\u064a\u062f {ct['spread'] * 100:.1f}%\n"
+                f"IV: {ct['iv'] * 100:.0f}% | OI: {ct['oi']:,} | \u062d\u062c\u0645 \u0627\u0644\u064a\u0648\u0645: {ct['volume']:,}\n"
+                "\u0644\u0627 \u062a\u062a\u0631\u0643\u0647 \u0644\u0622\u062e\u0631 \u064a\u0648\u0645 \u0642\u0628\u0644 \u0627\u0644\u0627\u0646\u062a\u0647\u0627\u0621\u060c \u0644\u0623\u0646 \u0642\u064a\u0645\u0629 \u0627\u0644\u0639\u0642\u062f \u062a\u062a\u0622\u0643\u0644 \u0628\u0633\u0631\u0639\u0629."
+            )
+
+    lines.append("\n" + format_news(ev.get("news")))
+    if ev.get("gex"):
+        lines.append("\n" + format_gex(ev["gex"], price))
+    else:
+        lines.append("\n\U0001f9f2 \u0627\u0644\u062c\u0627\u0645\u0627: \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629 \u0627\u0644\u0622\u0646.")
+    top = sorted(flow, key=lambda h: h["premium"], reverse=True)[:3]
+    if top:
+        lines.append("\n\U0001f525 \u0623\u0639\u0644\u0649 \u0639\u0642\u0648\u062f \u0646\u0634\u0627\u0637\u0627\u064b:\n\n" + "\n\n".join(format_hit(h) for h in top))
+    lines.append("\n\U0001f9e0 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062a\u0642\u064a\u064a\u0645 \u0627\u0644\u0641\u0646\u064a:\n" + "\n".join(f"\u2022 {r}" for r in ev["reasons"]))
+    lines.append(f"\n{DISCLAIMER}")
+    return "\n".join(lines)
+
+
 def gamma_report(raw):
-    sym = raw.upper().strip().lstrip("$")
-    if not re.fullmatch(r"[A-Z][A-Z.\-]{0,5}", sym):
+    sym = _sym(raw)
+    if not sym:
         return "\u0627\u0643\u062a\u0628 \u0627\u0644\u0623\u0645\u0631 \u0645\u0639 \u0631\u0645\u0632 \u0627\u0644\u0633\u0647\u0645\u060c \u0645\u062b\u0644: /gamma TSLA"
     t = get_ticker(sym)
     h = t.history(period="1d")
     if h is None or h.empty:
         return f"\u0645\u0627 \u0644\u0642\u064a\u062a \u0628\u064a\u0627\u0646\u0627\u062a \u0644\u0644\u0631\u0645\u0632 {sym}"
     price = float(h["Close"].iloc[-1])
-    g = compute_gex(t, price)
+    g = compute_gex(t, price, _realized_vol(t))
     if not g:
         return f"\u0645\u0627 \u0644\u0642\u064a\u062a \u0628\u064a\u0627\u0646\u0627\u062a \u0623\u0648\u0628\u0634\u0646\u0632 \u0643\u0627\u0641\u064a\u0629 \u0644\u062d\u0633\u0627\u0628 \u0627\u0644\u062c\u0627\u0645\u0627 \u0639\u0644\u0649 {sym}"
     return f"\U0001f4ca {sym}  ${price:.2f}\n\n{format_gex(g, price)}\n\n{DISCLAIMER}"
 
 
-def analyze(raw):
-    sym = raw.upper().strip().lstrip("$")
-    if not re.fullmatch(r"[A-Z][A-Z.\-]{0,5}", sym):
-        return "\u0627\u0643\u062a\u0628 \u0631\u0645\u0632 \u0633\u0647\u0645 \u0635\u062d\u064a\u062d \u0645\u062b\u0644: AAPL"
+def news_report(raw):
+    sym = _sym(raw)
+    if not sym:
+        return "\u0627\u0643\u062a\u0628 \u0627\u0644\u0623\u0645\u0631 \u0645\u0639 \u0631\u0645\u0632 \u0627\u0644\u0633\u0647\u0645\u060c \u0645\u062b\u0644: /news TSLA"
+    return f"\U0001f4ca {sym}\n\n{format_news(news_sentiment(get_ticker(sym)))}\n\n{DISCLAIMER}"
 
+
+def analyze(raw):
+    sym = _sym(raw)
+    if not sym:
+        return "\u0627\u0643\u062a\u0628 \u0631\u0645\u0632 \u0633\u0647\u0645 \u0635\u062d\u064a\u062d \u0645\u062b\u0644: AAPL\u060c \u0623\u0648 \u0627\u0633\u0645\u0647 \u0645\u062b\u0644: Tesla"
     try:
         flow = scan_ticker(sym)
     except Exception as e:  # noqa: BLE001
         log.warning("analyze flow failed: %s", type(e).__name__)
         flow = []
-    ev = evaluate(sym, flow)
+    ev = evaluate(sym, flow, full=True)
     if ev is None:
         return f"\u0645\u0627 \u0644\u0642\u064a\u062a \u0628\u064a\u0627\u0646\u0627\u062a \u0643\u0627\u0641\u064a\u0629 \u0644\u0644\u0631\u0645\u0632 {sym}"
-
-    text = format_evaluation(ev)
-    top = sorted(flow, key=lambda h: h["premium"], reverse=True)[:3]
-    if top:
-        text = text.replace(
-            f"\n\n{DISCLAIMER}",
-            "\n\n\U0001f525 \u0623\u0639\u0644\u0649 \u0639\u0642\u0648\u062f \u0646\u0634\u0627\u0637\u0627\u064b:\n\n" + "\n\n".join(format_hit(h) for h in top) + f"\n\n{DISCLAIMER}",
-        )
-    return text
+    return format_full(ev, flow)
 
 
 # ----------------------------------------------------------------------------
@@ -781,6 +1116,7 @@ HELP = (
     "\u0623\u0648\u0627\u0645\u0631 \u0627\u0644\u0628\u0648\u062a:\n"
     "\u2022 \u0623\u0631\u0633\u0644 \u0631\u0645\u0632 \u0633\u0647\u0645 (\u0645\u062b\u0644 TSLA) \u0648\u064a\u062c\u064a\u0643 \u062a\u0642\u064a\u064a\u0645 + \u062e\u0637\u0629 + \u0639\u0642\u062f \u0645\u0642\u062a\u0631\u062d\n"
     "\u2022 /scan \u0641\u062d\u0635 \u0641\u0648\u0631\u064a \u0644\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629 \u0645\u0639 \u0627\u0644\u062a\u0642\u064a\u064a\u0645\n"
+    "\u2022 /news TSLA \u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u0648\u062a\u0635\u0646\u064a\u0641\u0647\u0627 (\u0625\u064a\u062c\u0627\u0628\u064a\u0629 \u0623\u0648 \u0633\u0644\u0628\u064a\u0629)\n"
     "\u2022 /gamma TSLA \u0645\u0633\u062a\u0648\u064a\u0627\u062a \u0627\u0644\u062c\u0627\u0645\u0627 \u0648\u0627\u0644\u062c\u062f\u0631\u0627\u0646\n"
     "\u2022 /watch \u0639\u0631\u0636 \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629\n"
     "\u2022 /help \u0647\u0630\u064a \u0627\u0644\u0631\u0633\u0627\u0644\u0629\n\n"
@@ -806,6 +1142,10 @@ def handle_update(update):
         cmd = text.split()[0].split("@")[0].lower()
         if cmd in ("/start", "/help"):
             tg_send(chat_id, HELP)
+        elif cmd == "/news":
+            parts = text.split()
+            tg_send(chat_id, "\u23f3 \u0623\u062c\u0644\u0628 \u0627\u0644\u0623\u062e\u0628\u0627\u0631...")
+            tg_send(chat_id, news_report(parts[1] if len(parts) > 1 else ""))
         elif cmd == "/gamma":
             parts = text.split()
             tg_send(chat_id, "\u23f3 \u0623\u062d\u0633\u0628 \u0627\u0644\u062c\u0627\u0645\u0627...")
