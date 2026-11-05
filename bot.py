@@ -384,6 +384,10 @@ def _bs_gamma(S, K, T, sigma):
     return pdf / (S * sigma * math.sqrt(T))
 
 
+class GexUnavailable(Exception):
+    """Raised with a user-facing (Arabic) reason when gamma exposure cannot be computed."""
+
+
 def _realized_vol(t):
     try:
         d = t.history(period="1y", interval="1d")["Close"].dropna()
@@ -400,8 +404,11 @@ def compute_gex(t, price, fallback_iv=None):
     and if there is none, the stock's realized volatility. The share of estimated contracts is returned.
     """
     today = datetime.now(NY).date()
-    opts, used, est, total = [], 0, 0, 0
-    for exp in t.options:
+    opts, used, est, total, fails = [], 0, 0, 0, 0
+    exps = list(t.options)
+    if not exps:
+        raise GexUnavailable("Yahoo \u0645\u0627 \u0631\u062c\u0651\u0639 \u0623\u064a \u062a\u0648\u0627\u0631\u064a\u062e \u0623\u0648\u0628\u0634\u0646\u0632 \u0644\u0647\u0630\u0627 \u0627\u0644\u0633\u0647\u0645 (\u063a\u0627\u0644\u0628\u0627\u064b \u062d\u062f \u0627\u0644\u0637\u0644\u0628\u0627\u062a \u0623\u0648 \u0645\u0634\u0643\u0644\u0629 \u0627\u062a\u0635\u0627\u0644)")
+    for exp in exps:
         dte = (date.fromisoformat(exp) - today).days
         if dte < 0:
             continue
@@ -410,6 +417,9 @@ def compute_gex(t, price, fallback_iv=None):
         try:
             chain = t.option_chain(exp)
         except Exception:  # noqa: BLE001
+            fails += 1
+            if fails >= 2:
+                break
             continue
         used += 1
         tau = max(dte, 0.5) / 365.0
@@ -433,7 +443,11 @@ def compute_gex(t, price, fallback_iv=None):
             est += 1 if estimated else 0
             opts.append((sign, k, oi, iv, tau))
     if not opts:
-        return None
+        if used == 0 and fails:
+            raise GexUnavailable("\u0641\u0634\u0644 \u062c\u0644\u0628 \u0633\u0644\u0627\u0633\u0644 \u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0645\u0646 Yahoo (\u063a\u0627\u0644\u0628\u0627\u064b \u062d\u062f \u0627\u0644\u0637\u0644\u0628\u0627\u062a)\u060c \u062c\u0631\u0628 \u0628\u0639\u062f \u062f\u0642\u064a\u0642\u0629")
+        if used == 0:
+            raise GexUnavailable(f"\u0645\u0627 \u0641\u064a\u0647 \u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0646\u062a\u0647\u0627\u0621 \u0636\u0645\u0646 {GEX_MAX_DTE} \u064a\u0648\u0645")
+        raise GexUnavailable("\u0645\u0627 \u0641\u064a\u0647 Open Interest \u0623\u0648 IV \u0643\u0627\u0641\u064a \u0641\u064a \u0627\u0644\u0633\u0644\u0633\u0644\u0629 (\u063a\u0627\u0644\u0628\u0627\u064b \u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631 \u0648\u0628\u064a\u0627\u0646\u0627\u062a Yahoo \u0646\u0627\u0642\u0635\u0629)")
 
     def net_at(spot):
         return sum(s * _bs_gamma(spot, k, tau, iv) * oi * 100 * spot * spot * 0.01 for s, k, oi, iv, tau in opts)
@@ -540,6 +554,22 @@ def cap_targets(plan, side, gex, price):
         plan["rr"] = abs(plan["t2"] - price) / risk
 
 
+def _why_text(why):
+    if not why:
+        return None
+    key = max(why, key=why.get)
+    return {
+        "noquote": "\u0627\u0644\u0640 Bid/Ask \u0635\u0641\u0631 (\u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631 \u0623\u0648 \u0627\u0644\u0639\u0642\u0648\u062f \u0645\u0627 \u062a\u062a\u062f\u0627\u0648\u0644 \u0627\u0644\u062d\u064a\u0646)",
+        "lowoi": "\u0639\u0642\u0648\u062f \u0627\u0644\u0640 OI \u0641\u064a\u0647\u0627 \u0623\u0642\u0644 \u0645\u0646 100",
+        "spread": f"\u0627\u0644\u0633\u0628\u0631\u064a\u062f \u0623\u0639\u0644\u0649 \u0645\u0646 {MAX_SPREAD * 100:.0f}%",
+        "iv": "\u0645\u0627 \u0642\u062f\u0631\u062a \u0623\u062d\u0633\u0628 IV \u0644\u0644\u0639\u0642\u0648\u062f",
+        "delta": "\u0645\u0627 \u0641\u064a\u0647 \u062f\u0644\u062a\u0627 \u0645\u0646\u0627\u0633\u0628\u0629 \u0642\u0631\u064a\u0628\u0629 \u0645\u0646 \u0627\u0644\u0633\u0639\u0631",
+        "gain": "\u0627\u0644\u0639\u0642\u0648\u062f \u0645\u0627 \u062a\u062d\u0642\u0642 \u0631\u0628\u062d \u0639\u0646\u062f \u0627\u0644\u0647\u062f\u0641",
+        "chainfail": "\u0641\u0634\u0644 \u062c\u0644\u0628 \u0633\u0644\u0627\u0633\u0644 \u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0645\u0646 Yahoo (\u063a\u0627\u0644\u0628\u0627\u064b \u062d\u062f \u0627\u0644\u0637\u0644\u0628\u0627\u062a)",
+        "noexp": f"\u0645\u0627 \u0641\u064a\u0647 \u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0646\u062a\u0647\u0627\u0621 \u0628\u064a\u0646 {max(MIN_DTE, HOLD_DAYS + 3)} \u0648{MAX_DTE} \u064a\u0648\u0645",
+    }[key]
+
+
 def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
     """Price every liquid contract at target 1 / target 2 / stop and rank by gain-to-loss on the premium."""
     today = datetime.now(NY).date()
@@ -547,7 +577,11 @@ def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
     positive_gamma = bool(gex and gex["net"] > 0)
     lo_d, hi_d = (0.45, 0.80) if positive_gamma else (0.35, 0.70)
     min_dte = max(MIN_DTE, HOLD_DAYS + 3)
-    cands, blocked, used = [], False, 0
+    cands, blocked, used, fails, why = [], False, 0, 0, {}
+
+    def bump(key):
+        why[key] = why.get(key, 0) + 1
+
     for exp in t.options:
         exp_d = date.fromisoformat(exp)
         dte = (exp_d - today).days
@@ -563,16 +597,27 @@ def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
         try:
             chain = t.option_chain(exp)
         except Exception:  # noqa: BLE001
+            bump("chainfail")
+            fails += 1
+            if fails >= 2:
+                break
             continue
         used += 1
         df = chain.calls if is_call else chain.puts
         for row in df.itertuples():
             k, bid, ask, oi = _num(row.strike), _num(row.bid), _num(row.ask), _num(row.openInterest)
-            if bid <= 0 or ask <= 0 or oi < 100 or abs(k - price) / price > 0.06:
+            if abs(k - price) / price > 0.06:
+                continue
+            if bid <= 0 or ask <= 0:
+                bump("noquote")
+                continue
+            if oi < 100:
+                bump("lowoi")
                 continue
             mid = (bid + ask) / 2
             spread = (ask - bid) / mid
             if spread > MAX_SPREAD:
+                bump("spread")
                 continue
             tau = dte / 365.0
             iv = _num(row.impliedVolatility)
@@ -580,10 +625,12 @@ def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
             if not (0.05 <= iv <= 5.0):
                 iv, est_iv = (_implied_vol(mid, price, k, tau, is_call) or fallback_iv), True
             if not iv or not (0.05 <= iv <= 5.0):
+                bump("iv")
                 continue
             hold = min(HOLD_DAYS, dte - 1) / 365.0
             delta = _bs_delta(price, k, tau, iv, is_call)
             if not (lo_d <= abs(delta) <= hi_d):
+                bump("delta")
                 continue
             v1 = _bs_price(plan["t1"], k, tau - hold, iv, is_call)
             v2 = _bs_price(plan["t2"], k, tau - hold, iv, is_call)
@@ -591,6 +638,7 @@ def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
             gain1, gain2 = (v1 - ask) / ask, (v2 - ask) / ask
             loss = max((ask - vs) / ask, 0.05)
             if gain1 <= 0:
+                bump("gain")
                 continue
             cands.append(
                 {
@@ -600,6 +648,8 @@ def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
                     "loss": loss, "score": gain1 / loss,
                 }
             )
+    if used == 0 and not blocked and not why.get("chainfail"):
+        bump("noexp")
     cands.sort(key=lambda c: c["score"], reverse=True)
     top = cands[:3]
     if top:
@@ -619,7 +669,12 @@ def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
         if plan.get("note"):
             reasons.append("\u0627\u0644\u0623\u0647\u062f\u0627\u0641 \u0645\u062d\u0633\u0648\u0628\u0629 \u0628\u0639\u062f \u0636\u0628\u0637\u0647\u0627 \u0639\u0644\u0649 \u062c\u062f\u0627\u0631 \u0627\u0644\u062c\u0627\u0645\u0627")
         b0["reasons"] = reasons
-    return {"best": top[0] if top else None, "candidates": top, "blocked_by_earnings": blocked}
+    return {
+        "best": top[0] if top else None,
+        "candidates": top,
+        "blocked_by_earnings": blocked,
+        "why": None if top else _why_text(why),
+    }
 
 
 def earnings_in_window(t, until_iso):
@@ -722,10 +777,14 @@ def evaluate(sym, flow_hits=None, full=False):
     side = "CALL" if score > 0 else "PUT"
     strong = abs(score) >= STRONG_SCORE and abs(trend_pts) == 2 and trend_pts * score > 0
 
-    gex = None
+    gex, gex_reason = None, None
     try:
         gex = compute_gex(t, p, _realized_vol(t))
+    except GexUnavailable as e:
+        gex_reason = str(e)
+        log.warning("gex unavailable %s: %s", sym, gex_reason)
     except Exception as e:  # noqa: BLE001
+        gex_reason = "\u062e\u0637\u0623 \u063a\u064a\u0631 \u0645\u062a\u0648\u0642\u0639 \u0623\u062b\u0646\u0627\u0621 \u062d\u0633\u0627\u0628 \u0627\u0644\u062c\u0627\u0645\u0627"
         log.warning("gex failed %s: %s", sym, type(e).__name__)
     gex_warn = None
     if gex and abs(score) >= 3:
@@ -758,6 +817,8 @@ def evaluate(sym, flow_hits=None, full=False):
         "earnings": None,
         "gex": gex,
         "gex_warn": gex_warn,
+        "gex_reason": gex_reason,
+        "contract_why": None,
     }
 
     if label != "\u0645\u062d\u0627\u064a\u062f\u0629":
@@ -777,6 +838,7 @@ def evaluate(sym, flow_hits=None, full=False):
             picks = pick_contracts(t, side, p, out["plan"], _realized_vol(t), earn, gex)
             out["alternatives"] = picks["candidates"]
             out["contract"] = picks["best"]
+            out["contract_why"] = picks["why"]
             if picks["blocked_by_earnings"] and out["contract"] is None:
                 out["earnings"] = earn
         except Exception as e:  # noqa: BLE001
@@ -1103,7 +1165,7 @@ def build_confirmation(ev):
             checks.append(("\u2705", "\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u0645\u062d\u0627\u064a\u062f\u0629 \u0648\u0645\u0627 \u062a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647"))
 
     if ev.get("gex") is None:
-        checks.append(("\u2753", "\u0627\u0644\u062c\u0627\u0645\u0627 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629 (\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0646\u0627\u0642\u0635\u0629)"))
+        checks.append(("\u2753", "\u0627\u0644\u062c\u0627\u0645\u0627 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629: " + (ev.get("gex_reason") or "\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0646\u0627\u0642\u0635\u0629")))
         waits.append("\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u062c\u0627\u0645\u0627")
     elif ev.get("gex_warn"):
         checks.append(("\u274c", ev["gex_warn"]))
@@ -1114,8 +1176,10 @@ def build_confirmation(ev):
     ct = ev.get("contract")
     if ct:
         checks.append(("\u2705", f"\u0641\u064a\u0647 \u0639\u0642\u062f \u0633\u064a\u0648\u0644\u062a\u0647 \u062c\u064a\u062f\u0629 ({ct['dte']} \u064a\u0648\u0645\u060c \u0633\u0628\u0631\u064a\u062f {ct['spread'] * 100:.1f}%)"))
+    elif ev.get("plan") is None:
+        checks.append(("\u2796", "\u0645\u0627 \u0628\u062d\u062b\u062a \u0639\u0646 \u0639\u0642\u062f \u0644\u0623\u0646 \u0645\u0627 \u0641\u064a\u0647 \u0627\u062a\u062c\u0627\u0647 \u0648\u0627\u0636\u062d"))
     else:
-        checks.append(("\u2753", "\u0645\u0627 \u0644\u0642\u064a\u062a \u0639\u0642\u062f \u0633\u064a\u0648\u0644\u062a\u0647 \u0645\u0646\u0627\u0633\u0628\u0629 \u0627\u0644\u062d\u064a\u0646"))
+        checks.append(("\u2753", "\u0645\u0627 \u0644\u0642\u064a\u062a \u0639\u0642\u062f \u0645\u0646\u0627\u0633\u0628: " + (ev.get("contract_why") or "\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0633\u0644\u0633\u0644\u0629 \u0646\u0627\u0642\u0635\u0629")))
         waits.append("\u0639\u0642\u062f \u0645\u0646\u0627\u0633\u0628")
 
     plan_ = ev.get("plan")
@@ -1223,7 +1287,7 @@ def format_full(ev, flow):
     if ev.get("gex"):
         lines.append("\n" + format_gex(ev["gex"], price))
     else:
-        lines.append("\n\U0001f9f2 \u0627\u0644\u062c\u0627\u0645\u0627: \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629 \u0627\u0644\u0622\u0646.")
+        lines.append("\n\U0001f9f2 \u0627\u0644\u062c\u0627\u0645\u0627: \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629. " + (ev.get("gex_reason") or ""))
     top = sorted(flow, key=lambda h: h["premium"], reverse=True)[:3]
     if top:
         lines.append("\n\U0001f525 \u0623\u0639\u0644\u0649 \u0639\u0642\u0648\u062f \u0646\u0634\u0627\u0637\u0627\u064b:\n\n" + "\n\n".join(format_hit(h) for h in top))
@@ -1241,9 +1305,10 @@ def gamma_report(raw):
     if h is None or h.empty:
         return f"\u0645\u0627 \u0644\u0642\u064a\u062a \u0628\u064a\u0627\u0646\u0627\u062a \u0644\u0644\u0631\u0645\u0632 {sym}"
     price = float(h["Close"].iloc[-1])
-    g = compute_gex(t, price, _realized_vol(t))
-    if not g:
-        return f"\u0645\u0627 \u0644\u0642\u064a\u062a \u0628\u064a\u0627\u0646\u0627\u062a \u0623\u0648\u0628\u0634\u0646\u0632 \u0643\u0627\u0641\u064a\u0629 \u0644\u062d\u0633\u0627\u0628 \u0627\u0644\u062c\u0627\u0645\u0627 \u0639\u0644\u0649 {sym}"
+    try:
+        g = compute_gex(t, price, _realized_vol(t))
+    except GexUnavailable as e:
+        return f"\u0627\u0644\u062c\u0627\u0645\u0627 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629 \u0639\u0644\u0649 {sym}: {e}"
     return f"\U0001f4ca {sym}  ${price:.2f}\n\n{format_gex(g, price)}\n\n{DISCLAIMER}"
 
 
