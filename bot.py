@@ -1,10 +1,10 @@
-"""Options Bot - Manual + Strict Auto Alerts"""
+"""Options Bot - Fixed Manual + Strict Auto"""
 
 import os
 import time
 import logging
 import threading
-from datetime import date
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -20,12 +20,10 @@ CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 
 WATCHLIST = [
-    "SPY","QQQ","IWM","AAPL","MSFT","NVDA","TSLA","AMZN","META",
-    "GOOGL","AMD","NFLX","AVGO","JPM","BAC","XOM","UNH","LLY",
-    "V","MA","HD","COST","CRM","ORCL","ADBE","INTC","MU","QCOM"
+    "SPY","QQQ","AAPL","MSFT","NVDA","TSLA","AMZN","META","GOOGL","AMD","NFLX"
 ]
 
-SCAN_INTERVAL = 15 * 60
+SCAN_INTERVAL = 20 * 60
 NY = ZoneInfo("America/New_York")
 API = f"https://api.telegram.org/bot{TOKEN}"
 DISCLAIMER = "⚠️ تحليل فني فقط وليس ضمان. لا تخاطر بأكثر من 1-2% من رأس مالك."
@@ -33,7 +31,7 @@ DISCLAIMER = "⚠️ تحليل فني فقط وليس ضمان. لا تخاطر
 app = Flask(__name__)
 _sent_today = set()
 
-NEGATIVE_WORDS = ["lawsuit", "sec", "investigation", "downgrade", "miss", "cut", "warning", "bankruptcy", "probe", "fine"]
+NEGATIVE_WORDS = ["lawsuit", "sec", "investigation", "downgrade", "miss", "cut", "warning"]
 
 def tg_send(chat_id, text):
     if not TOKEN or not chat_id:
@@ -98,7 +96,7 @@ def get_ticker_data(sym):
 def get_news(t):
     try:
         news = t.news or []
-        return [(n.get("title") or "")[:120] for n in news[:4] if n.get("title")]
+        return [(n.get("title") or "")[:120] for n in news[:3] if n.get("title")]
     except:
         return []
 
@@ -121,7 +119,6 @@ def get_gamma(t):
         return None
 
 def full_analysis(sym):
-    """Returns (message, is_strong_entry, key)"""
     sym = sym.upper().strip()
     d = get_ticker_data(sym)
     if not d:
@@ -236,7 +233,7 @@ def full_analysis(sym):
 
     if news:
         lines.append("\n📰 أخبار:")
-        lines += [f"• {n}" for n in news[:3]]
+        lines += [f"• {n}" for n in news]
         if bad_news:
             lines.append("⛔ فيه أخبار سلبية")
 
@@ -254,18 +251,12 @@ def scanner_loop():
                     _sent_today.clear()
                     scanner_loop.day = today
 
-                strong = []
                 for sym in WATCHLIST:
                     msg, is_strong, key = full_analysis(sym)
                     if is_strong and key and key not in _sent_today:
-                        strong.append((sym, msg))
+                        tg_send(CHAT_ID, "🔥 توصية تلقائية:\n\n" + msg)
                         _sent_today.add(key)
-                    time.sleep(0.6)
-
-                if strong:
-                    header = "🔥 توصيات تلقائية (دخول قوي فقط):\n\n"
-                    body = "\n\n".join(m for _, m in strong[:4])
-                    tg_send(CHAT_ID, header + body)
+                    time.sleep(1)
         except Exception as e:
             log.error("scanner: %s", e)
         time.sleep(SCAN_INTERVAL)
@@ -282,16 +273,7 @@ def handle_update(update):
 
         low = text.lower()
         if low in ("/start", "/help"):
-            tg_send(chat_id, "أرسل رمز سهم مثل NVDA\n/scan لفحص يدوي سريع\nالتلقائي يرسل فقط التوصيات القوية")
-            return
-        if low.startswith("/scan"):
-            tg_send(chat_id, "⏳ أفحص الأسهم القوية...")
-            results = []
-            for s in WATCHLIST[:6]:
-                _, is_strong, _ = full_analysis(s)
-                if is_strong:
-                    results.append(s)
-            tg_send(chat_id, "أسهم بشروط قوية حالياً:\n" + ("\n".join(results) if results else "ما فيه شيء قوي حالياً"))
+            tg_send(chat_id, "أرسل رمز سهم مثل MSFT أو NVDA\nالبوت يرد يدوياً + يرسل تلقائي فقط التوصيات القوية")
             return
 
         tg_send(chat_id, "⏳ أحلل...")
@@ -311,12 +293,12 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "Options Bot Running (Manual + Strict Auto)"
+    return "Options Bot Running"
 
 def start():
     threading.Thread(target=register_webhook, daemon=True).start()
     threading.Thread(target=scanner_loop, daemon=True).start()
-    log.info("Manual + Strict Auto started")
+    log.info("Fixed bot started")
 
 start()
 
