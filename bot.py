@@ -1,4 +1,4 @@
-"""Options Bot - Reliable Fast"""
+"""Options Bot - With Short & Long Expiry"""
 
 import os
 import logging
@@ -56,6 +56,31 @@ def calc_rsi(closes, period=14):
         return float(rsi.iloc[-1]) if not rsi.empty else 50
     except:
         return 50
+
+def find_contract(t, side, price, min_dte, max_dte):
+    try:
+        opts = t.options
+        if not opts:
+            return None
+        today = date.today()
+        for exp in opts:
+            dte = (date.fromisoformat(exp) - today).days
+            if min_dte <= dte <= max_dte:
+                ch = t.option_chain(exp)
+                df = ch.calls if side == "CALL" else ch.puts
+                df = df[(df["bid"] > 0) & (df["ask"] > 0) & df["lastPrice"].between(10, 90)].copy()
+                if not df.empty:
+                    df["dist"] = abs(df["strike"] - price)
+                    best = df.nsmallest(1, "dist").iloc[0]
+                    return {
+                        "strike": best["strike"],
+                        "expiry": exp,
+                        "price": float(best["lastPrice"]),
+                        "dte": dte
+                    }
+        return None
+    except:
+        return None
 
 def analyze(sym):
     sym = sym.upper().strip()
@@ -138,11 +163,30 @@ def analyze(sym):
             f"نسبة المخاطرة/العائد: 1:{rr:.1f}",
         ]
 
+        if side != "محايد":
+            short = find_contract(t, side, price, 5, 21)
+            long = find_contract(t, side, price, 25, 60)
+
+            if short:
+                lines += [
+                    "",
+                    "عقد قصير الأجل:",
+                    f"{sym} {side} {short['strike']:g} | {short['expiry']} ({short['dte']} يوم)",
+                    f"سعر تقريبي: ${short['price']:.2f}",
+                ]
+            if long:
+                lines += [
+                    "",
+                    "عقد أطول أجل:",
+                    f"{sym} {side} {long['strike']:g} | {long['expiry']} ({long['dte']} يوم)",
+                    f"سعر تقريبي: ${long['price']:.2f}",
+                ]
+
         lines.append(f"\n{DISCLAIMER}")
         return "\n".join(lines)
     except Exception as e:
         log.error("analyze %s: %s", sym, e)
-        return f"تعذر تحليل {sym} حالياً (Yahoo بطيء). جرب بعد 30 ثانية."
+        return f"تعذر تحليل {sym} حالياً. جرب بعد 30 ثانية."
 
 def handle_update(update):
     try:
@@ -156,16 +200,13 @@ def handle_update(update):
 
         low = text.lower()
         if low in ("/start", "/help"):
-            tg_send(chat_id, "أرسل رمز سهم مثل NVDA أو AMD")
+            tg_send(chat_id, "أرسل رمز سهم مثل NVDA\nيعطي حكم + عقد قصير + عقد طويل")
             return
 
         tg_send(chat_id, "⏳ أحلل...")
-        result = analyze(text)
-        tg_send(chat_id, result)
+        tg_send(chat_id, analyze(text))
     except Exception as e:
         log.error("handle: %s", e)
-        if CHAT_ID:
-            tg_send(CHAT_ID, "خطأ مؤقت. جرب مرة ثانية.")
 
 @app.route(f"/webhook/{SECRET}", methods=["POST"])
 def webhook():
@@ -180,7 +221,7 @@ def home():
 
 def start():
     threading.Thread(target=register_webhook, daemon=True).start()
-    log.info("Reliable bot started")
+    log.info("Bot started")
 
 start()
 
