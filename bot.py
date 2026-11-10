@@ -70,27 +70,30 @@ CHAT_ID = str(_env("TELEGRAM_CHAT_ID")).strip()
 PUBLIC_URL = _env("PUBLIC_URL").strip().rstrip("/")
 WATCHLIST = [
     s.strip().upper()
-    for s in _env("WATCHLIST", "SPY,QQQ,AAPL,TSLA,NVDA,AMD,AMZN,META,MSFT").split(",")
+    for s in _env(
+        "WATCHLIST",
+        "SPY,QQQ,IWM,DIA,AAPL,MSFT,NVDA,TSLA,AMZN,META,GOOGL,AMD,NFLX,AVGO,COST,JPM,BAC,XOM,CVX,UNH,LLY,JNJ,V,MA,HD,PG,KO,PEP,WMT,DIS,CRM,ORCL,ADBE,INTC,MU,QCOM,TXN,BA,CAT,GE"
+    ).split(",")
     if s.strip()
 ]
-SCAN_INTERVAL = int(_env("SCAN_INTERVAL_MIN", "15")) * 60
-MIN_VOLUME = int(_env("MIN_VOLUME", "500"))
-MIN_VOL_OI = float(_env("MIN_VOL_OI", "2.0"))
-MIN_PREMIUM = float(_env("MIN_PREMIUM", "100000"))
-MAX_ALERTS = int(_env("MAX_ALERTS", "8"))
-EXPIRIES_TO_SCAN = int(_env("EXPIRIES_TO_SCAN", "3"))
-STRIKE_RANGE = 0.15  # only look at strikes within +-15% of the underlying price
+SCAN_INTERVAL = int(_env("SCAN_INTERVAL_MIN", "12")) * 60
+MIN_VOLUME = int(_env("MIN_VOLUME", "300"))
+MIN_VOL_OI = float(_env("MIN_VOL_OI", "1.8"))
+MIN_PREMIUM = float(_env("MIN_PREMIUM", "75000"))
+MAX_ALERTS = int(_env("MAX_ALERTS", "12"))
+EXPIRIES_TO_SCAN = int(_env("EXPIRIES_TO_SCAN", "4"))
+STRIKE_RANGE = 0.18
 
-MIN_SCORE_ALERT = int(_env("MIN_SCORE_ALERT", "0"))
-STRONG_SCORE = int(_env("STRONG_SCORE", "5"))
+MIN_SCORE_ALERT = int(_env("MIN_SCORE_ALERT", "4"))
+STRONG_SCORE = int(_env("STRONG_SCORE", "6"))
 MAX_SCORE = 8
-MIN_DTE = int(_env("MIN_DTE", "7"))
-MAX_DTE = int(_env("MAX_DTE", "45"))
-MAX_SPREAD = float(_env("MAX_SPREAD", "0.12"))
+MIN_DTE = int(_env("MIN_DTE", "3"))
+MAX_DTE = int(_env("MAX_DTE", "60"))
+MAX_SPREAD = float(_env("MAX_SPREAD", "0.15"))
 ATR_STOP = float(_env("ATR_STOP", "1.5"))
 ATR_TARGET = float(_env("ATR_TARGET", "3.0"))
-GEX_EXPIRIES = int(_env("GEX_EXPIRIES", "4"))
-GEX_MAX_DTE = int(_env("GEX_MAX_DTE", "45"))
+GEX_EXPIRIES = int(_env("GEX_EXPIRIES", "5"))
+GEX_MAX_DTE = int(_env("GEX_MAX_DTE", "60"))
 RISK_FREE = 0.04
 HOLD_DAYS = int(_env("HOLD_DAYS", "5"))
 
@@ -482,9 +485,7 @@ def compute_gex(t, price, fallback_iv=None):
 
 def _norm_cdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
-
-
-def _bs_d1(S, K, T, sigma):
+  def _bs_d1(S, K, T, sigma):
     return (math.log(S / K) + (RISK_FREE + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
 
 
@@ -543,13 +544,13 @@ def cap_targets(plan, side, gex, price):
         if wall and price < wall < plan["t2"]:
             plan["t2"] = wall
             plan["t1"] = min(plan["t1"], price + (wall - price) / 2)
-            plan["note"] = f"\u0647\u062f\u0641 2 \u0645\u062e\u0641\u0651\u0636 \u0625\u0644\u0649 ${wall:g} \u0644\u0623\u0646 \u062c\u062f\u0627\u0631 CALL (\u0645\u0642\u0627\u0648\u0645\u0629 \u062c\u0627\u0645\u0627) \u0639\u0646\u062f\u0647."
+            plan["note"] = f"هدف 2 مخفّض إلى ${wall:g} لأن جدار CALL (مقاومة جاما) عنده."
     else:
         wall = gex["put_wall"]
         if wall and plan["t2"] < wall < price:
             plan["t2"] = wall
             plan["t1"] = max(plan["t1"], price - (price - wall) / 2)
-            plan["note"] = f"\u0647\u062f\u0641 2 \u0645\u062e\u0641\u0651\u0636 \u0625\u0644\u0649 ${wall:g} \u0644\u0623\u0646 \u062c\u062f\u0627\u0631 PUT (\u062f\u0639\u0645 \u062c\u0627\u0645\u0627) \u0639\u0646\u062f\u0647."
+            plan["note"] = f"هدف 2 مخفّض إلى ${wall:g} لأن جدار PUT (دعم جاما) عنده."
     if risk > 0:
         plan["rr"] = abs(plan["t2"] - price) / risk
 
@@ -559,14 +560,14 @@ def _why_text(why):
         return None
     key = max(why, key=why.get)
     return {
-        "noquote": "\u0627\u0644\u0640 Bid/Ask \u0635\u0641\u0631 (\u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631 \u0623\u0648 \u0627\u0644\u0639\u0642\u0648\u062f \u0645\u0627 \u062a\u062a\u062f\u0627\u0648\u0644 \u0627\u0644\u062d\u064a\u0646)",
-        "lowoi": "\u0639\u0642\u0648\u062f \u0627\u0644\u0640 OI \u0641\u064a\u0647\u0627 \u0623\u0642\u0644 \u0645\u0646 100",
-        "spread": f"\u0627\u0644\u0633\u0628\u0631\u064a\u062f \u0623\u0639\u0644\u0649 \u0645\u0646 {MAX_SPREAD * 100:.0f}%",
-        "iv": "\u0645\u0627 \u0642\u062f\u0631\u062a \u0623\u062d\u0633\u0628 IV \u0644\u0644\u0639\u0642\u0648\u062f",
-        "delta": "\u0645\u0627 \u0641\u064a\u0647 \u062f\u0644\u062a\u0627 \u0645\u0646\u0627\u0633\u0628\u0629 \u0642\u0631\u064a\u0628\u0629 \u0645\u0646 \u0627\u0644\u0633\u0639\u0631",
-        "gain": "\u0627\u0644\u0639\u0642\u0648\u062f \u0645\u0627 \u062a\u062d\u0642\u0642 \u0631\u0628\u062d \u0639\u0646\u062f \u0627\u0644\u0647\u062f\u0641",
-        "chainfail": "\u0641\u0634\u0644 \u062c\u0644\u0628 \u0633\u0644\u0627\u0633\u0644 \u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0645\u0646 Yahoo (\u063a\u0627\u0644\u0628\u0627\u064b \u062d\u062f \u0627\u0644\u0637\u0644\u0628\u0627\u062a)",
-        "noexp": f"\u0645\u0627 \u0641\u064a\u0647 \u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0646\u062a\u0647\u0627\u0621 \u0628\u064a\u0646 {max(MIN_DTE, HOLD_DAYS + 3)} \u0648{MAX_DTE} \u064a\u0648\u0645",
+        "noquote": "الـ Bid/Ask صفر (السوق مسكر أو العقود ما تتداول الحين)",
+        "lowoi": "عقود الـ OI فيها أقل من 100",
+        "spread": f"السبريد أعلى من {MAX_SPREAD * 100:.0f}%",
+        "iv": "ما قدرت أحسب IV للعقد",
+        "delta": "ما فيه دلتا مناسبة قريبة من السعر",
+        "gain": "العقد ما تحقق ربح عند الهدف",
+        "chainfail": "فشل جلب سلاسل الأوبشنز من Yahoo (غالباً حد الطلبات)",
+        "noexp": f"ما فيه تواريخ انتهاء بين {max(MIN_DTE, HOLD_DAYS + 3)} و{MAX_DTE} يوم",
     }[key]
 
 
@@ -615,6 +616,9 @@ def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
                 bump("lowoi")
                 continue
             mid = (bid + ask) / 2
+            # فلتر سعر العقد بين 10 و 90 دولار
+            if mid < 10.0 or mid > 90.0:
+                continue
             spread = (ask - bid) / mid
             if spread > MAX_SPREAD:
                 bump("spread")
@@ -632,68 +636,53 @@ def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
             if not (lo_d <= abs(delta) <= hi_d):
                 bump("delta")
                 continue
-            v1 = _bs_price(plan["t1"], k, tau - hold, iv, is_call)
-            v2 = _bs_price(plan["t2"], k, tau - hold, iv, is_call)
-            vs = _bs_price(plan["stop"], k, tau - hold, iv, is_call)
-            gain1, gain2 = (v1 - ask) / ask, (v2 - ask) / ask
-            loss = max((ask - vs) / ask, 0.05)
-            if gain1 <= 0:
+
+            # تقدير الربح والخسارة عند الأهداف
+            p1 = _bs_price(plan["t1"], k, hold, iv, is_call)
+            p2 = _bs_price(plan["t2"], k, hold, iv, is_call)
+            pstop = _bs_price(plan["stop"], k, hold, iv, is_call)
+            gain1 = (p1 - mid) / mid if mid > 0 else 0
+            gain2 = (p2 - mid) / mid if mid > 0 else 0
+            loss = (mid - pstop) / mid if mid > 0 else 0
+
+            if gain1 <= 0 and gain2 <= 0:
                 bump("gain")
                 continue
-            cands.append(
-                {
-                    "side": side, "expiry": exp, "dte": dte, "strike": k, "bid": bid, "ask": ask,
-                    "spread": spread, "iv": iv, "est_iv": est_iv, "delta": delta, "oi": int(oi),
-                    "volume": int(_num(getattr(row, "volume", 0))), "gain1": gain1, "gain2": gain2,
-                    "loss": loss, "score": gain1 / loss,
-                }
-            )
-    if used == 0 and not blocked and not why.get("chainfail"):
-        bump("noexp")
-    cands.sort(key=lambda c: c["score"], reverse=True)
-    top = cands[:3]
-    if top:
-        b0 = top[0]
-        reasons = [
-            f"{b0['dte']} \u064a\u0648\u0645: \u064a\u0643\u0641\u064a \u0644\u0648\u0635\u0648\u0644 \u0627\u0644\u0647\u062f\u0641 (~{HOLD_DAYS} \u0623\u064a\u0627\u0645) \u0645\u0639 \u0647\u0627\u0645\u0634 \u0642\u0628\u0644 \u0645\u0627 \u064a\u062a\u0622\u0643\u0644 \u0627\u0644\u0648\u0642\u062a",
-            f"\u0623\u0641\u0636\u0644 \u0646\u0633\u0628\u0629 \u0639\u0627\u0626\u062f/\u062e\u0633\u0627\u0631\u0629 \u062a\u0642\u062f\u064a\u0631\u064a\u0629 \u0639\u0644\u0649 \u0627\u0644\u0642\u0633\u0637 \u0628\u064a\u0646 {len(cands)} \u0639\u0642\u062f \u0633\u0627\u0626\u0644 (\u0639\u0646\u062f \u0647\u062f\u0641 2: 1:{b0['gain2'] / b0['loss']:.1f})",
-        ]
-        if earn:
-            reasons.append(f"\u064a\u0646\u062a\u0647\u064a \u0642\u0628\u0644 \u0625\u0639\u0644\u0627\u0646 \u0627\u0644\u0623\u0631\u0628\u0627\u062d ({earn})")
-        if gex:
-            reasons.append(
-                "\u0627\u0644\u062c\u0627\u0645\u0627 \u0645\u0648\u062c\u0628\u0629 (\u062d\u0631\u0643\u0629 \u0623\u0647\u062f\u0623)\u060c \u0641\u0627\u062e\u062a\u0631\u062a \u062f\u0644\u062a\u0627 \u0623\u0639\u0644\u0649 \u0648\u0623\u0642\u0631\u0628 \u0644\u0644\u0633\u0639\u0631"
-                if positive_gamma
-                else "\u0627\u0644\u062c\u0627\u0645\u0627 \u0633\u0627\u0644\u0628\u0629 (\u062d\u0631\u0643\u0629 \u0623\u0643\u0628\u0631 \u0645\u062d\u062a\u0645\u0644\u0629)\u060c \u0641\u0633\u0645\u062d\u062a \u0628\u062f\u0644\u062a\u0627 \u0623\u0642\u0644"
-            )
-        if plan.get("note"):
-            reasons.append("\u0627\u0644\u0623\u0647\u062f\u0627\u0641 \u0645\u062d\u0633\u0648\u0628\u0629 \u0628\u0639\u062f \u0636\u0628\u0637\u0647\u0627 \u0639\u0644\u0649 \u062c\u062f\u0627\u0631 \u0627\u0644\u062c\u0627\u0645\u0627")
-        b0["reasons"] = reasons
-    return {
-        "best": top[0] if top else None,
-        "candidates": top,
-        "blocked_by_earnings": blocked,
-        "why": None if top else _why_text(why),
-    }
 
+            cands.append({
+                "strike": k,
+                "expiry": exp,
+                "dte": dte,
+                "bid": bid,
+                "ask": ask,
+                "mid": mid,
+                "spread": spread,
+                "iv": iv,
+                "est_iv": est_iv,
+                "delta": delta,
+                "oi": int(oi),
+                "volume": int(_num(row.volume)),
+                "gain1": gain1,
+                "gain2": gain2,
+                "loss": loss,
+                "side": side,
+                "contractSymbol": getattr(row, "contractSymbol", ""),
+                "reasons": [],
+            })
 
-def earnings_in_window(t, until_iso):
-    """Return an earnings date between today and the contract expiry, if known."""
-    try:
-        cal = t.calendar
-        dates = cal.get("Earnings Date") or []
-        today = datetime.now(NY).date()
-        until = date.fromisoformat(until_iso)
-        for d in dates:
-            if today <= d <= until:
-                return d
-    except Exception:  # noqa: BLE001
-        pass
-    return None
+    if not cands:
+        return None, _why_text(why)
 
-
-def evaluate(sym, flow_hits=None, full=False):
-    """Score a ticker and build a trade plan. Returns None when data is missing."""
+    # رتب حسب نسبة الربح إلى الخسارة
+    cands.sort(key=lambda x: (x["gain2"] / max(x["loss"], 0.01)), reverse=True)
+    best = cands[0]
+    best["reasons"] = [
+        f"دلتا {abs(best['delta']):.2f}",
+        f"سبريد {best['spread']*100:.1f}%",
+        f"OI {best['oi']:,}",
+    ]
+    return best, cands[:3]
+def rate_symbol(sym, flow=None):
     t = get_ticker(sym)
     tech = technicals(t)
     if tech is None:
@@ -705,647 +694,192 @@ def evaluate(sym, flow_hits=None, full=False):
     # 1) trend
     if p > tech["ema20"] > tech["ema50"]:
         trend_pts = 2
-        reasons.append("\u062a\u0631\u0646\u062f \u0635\u0627\u0639\u062f: \u0627\u0644\u0633\u0639\u0631 \u0641\u0648\u0642 EMA20 \u0648EMA20 \u0641\u0648\u0642 EMA50 (+2)")
+        reasons.append("ترند صاعد: السعر فوق EMA20 فوق EMA50 (+2)")
+        score += 2
     elif p < tech["ema20"] < tech["ema50"]:
         trend_pts = -2
-        reasons.append("\u062a\u0631\u0646\u062f \u0647\u0627\u0628\u0637: \u0627\u0644\u0633\u0639\u0631 \u062a\u062d\u062a EMA20 \u0648EMA20 \u062a\u062d\u062a EMA50 (-2)")
+        reasons.append("ترند هابط: السعر تحت EMA20 تحت EMA50 (-2)")
+        score -= 2
     else:
-        reasons.append("\u0627\u0644\u062a\u0631\u0646\u062f \u063a\u064a\u0631 \u0648\u0627\u0636\u062d (EMA \u0645\u062a\u062f\u0627\u062e\u0644\u0629) (0)")
-    score += trend_pts
+        reasons.append("ترند مختلط (0)")
 
-    # 2) long-term position
+    # 2) SMA200
     if tech["sma200"] is not None:
         if p > tech["sma200"]:
             score += 1
-            reasons.append("\u0627\u0644\u0633\u0639\u0631 \u0641\u0648\u0642 SMA-200 (+1)")
+            reasons.append("السعر فوق SMA-200 (+1)")
         else:
             score -= 1
-            reasons.append("\u0627\u0644\u0633\u0639\u0631 \u062a\u062d\u062a SMA-200 (-1)")
+            reasons.append("السعر تحت SMA-200 (-1)")
 
     # 3) MACD
     h, hp = tech["macd_hist"], tech["macd_hist_prev"]
     if h > 0 and h > hp:
         score += 1
-        reasons.append("\u0632\u062e\u0645 MACD \u0625\u064a\u062c\u0627\u0628\u064a \u0648\u064a\u062a\u0632\u0627\u064a\u062f (+1)")
+        reasons.append("زخم MACD إيجابي ويتزايد (+1)")
     elif h < 0 and h < hp:
         score -= 1
-        reasons.append("\u0632\u062e\u0645 MACD \u0633\u0644\u0628\u064a \u0648\u064a\u062a\u0632\u0627\u064a\u062f (-1)")
+        reasons.append("زخم MACD سلبي ويتزايد (-1)")
 
     # 4) RSI zone
     r = tech["rsi"]
     if r is not None:
         if r >= 75:
             score -= 1
-            reasons.append(f"RSI {r:.0f} \u062a\u0634\u0628\u0639 \u0634\u0631\u0627\u0621\u060c \u062e\u0637\u0631 \u062a\u0635\u062d\u064a\u062d (-1)")
+            reasons.append(f"RSI {r:.0f} تشبع شراء، خطر تصحيح (-1)")
         elif r <= 25:
             score += 1
-            reasons.append(f"RSI {r:.0f} \u062a\u0634\u0628\u0639 \u0628\u064a\u0639\u060c \u0627\u062d\u062a\u0645\u0627\u0644 \u0627\u0631\u062a\u062f\u0627\u062f (+1)")
+            reasons.append(f"RSI {r:.0f} تشبع بيع، احتمال ارتداد (+1)")
         elif r >= 50:
             score += 1
-            reasons.append(f"RSI {r:.0f} \u0641\u064a \u0645\u0646\u0637\u0642\u0629 \u0642\u0648\u0629 (+1)")
+            reasons.append(f"RSI {r:.0f} في منطقة قوة (+1)")
         else:
             score -= 1
-            reasons.append(f"RSI {r:.0f} \u0641\u064a \u0645\u0646\u0637\u0642\u0629 \u0636\u0639\u0641 (-1)")
+            reasons.append(f"RSI {r:.0f} في منطقة ضعف (-1)")
 
     # 5) volume spike with direction
-    vr = tech["vol_ratio"]
-    if vr is not None and vr >= 1.5:
-        if tech["day_up"]:
-            score += 1
-            reasons.append(f"\u062d\u062c\u0645 \u0623\u0639\u0644\u0649 \u0645\u0646 \u0627\u0644\u0645\u0639\u062a\u0627\u062f {vr:.1f}x \u0645\u0639 \u0625\u063a\u0644\u0627\u0642 \u0635\u0627\u0639\u062f (+1)")
-        else:
-            score -= 1
-            reasons.append(f"\u062d\u062c\u0645 \u0623\u0639\u0644\u0649 \u0645\u0646 \u0627\u0644\u0645\u0639\u062a\u0627\u062f {vr:.1f}x \u0645\u0639 \u0625\u063a\u0644\u0627\u0642 \u0647\u0627\u0628\u0637 (-1)")
+    if tech["vol_ratio"] is not None:
+        if tech["vol_ratio"] >= 1.5:
+            if tech["day_up"]:
+                score += 1
+                reasons.append(f"حجم عالي مع صعود ({tech['vol_ratio']:.1f}x) (+1)")
+            else:
+                score -= 1
+                reasons.append(f"حجم عالي مع هبوط ({tech['vol_ratio']:.1f}x) (-1)")
 
-    # 6) unusual options flow
-    flow_pts = 0
-    if flow_hits:
-        calls = sum(x["premium"] for x in flow_hits if x["side"] == "CALL")
-        puts = sum(x["premium"] for x in flow_hits if x["side"] == "PUT")
-        if calls > 0 and calls >= 1.5 * puts:
-            flow_pts = 2
-            reasons.append(f"\u062a\u062f\u0641\u0642 \u0623\u0648\u0628\u0634\u0646\u0632 \u063a\u064a\u0631 \u0639\u0627\u062f\u064a \u0644\u0635\u0627\u0644\u062d CALL ({money(calls)} \u0645\u0642\u0627\u0628\u0644 {money(puts)}) (+2)")
-        elif puts > 0 and puts >= 1.5 * calls:
-            flow_pts = -2
-            reasons.append(f"\u062a\u062f\u0641\u0642 \u0623\u0648\u0628\u0634\u0646\u0632 \u063a\u064a\u0631 \u0639\u0627\u062f\u064a \u0644\u0635\u0627\u0644\u062d PUT ({money(puts)} \u0645\u0642\u0627\u0628\u0644 {money(calls)}) (-2)")
-        else:
-            reasons.append("\u062a\u062f\u0641\u0642 \u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0645\u062a\u0639\u0627\u062f\u0644 \u0628\u064a\u0646 CALL \u0648PUT (0)")
-    else:
-        reasons.append("\u0645\u0627 \u0641\u064a\u0647 \u062a\u062f\u0641\u0642 \u0623\u0648\u0628\u0634\u0646\u0632 \u063a\u064a\u0631 \u0639\u0627\u062f\u064a \u062d\u0627\u0644\u064a\u0627\u064b (0)")
-    score += flow_pts
+    # 6) options flow
+    if flow:
+        call_prem = sum(h["premium"] for h in flow if h["side"] == "CALL")
+        put_prem = sum(h["premium"] for h in flow if h["side"] == "PUT")
+        if call_prem + put_prem > 0:
+            if call_prem > put_prem * 1.5:
+                score += 2
+                reasons.append(f"تدفق خيارات قوي على الـ CALL (+2)")
+            elif put_prem > call_prem * 1.5:
+                score -= 2
+                reasons.append(f"تدفق خيارات قوي على الـ PUT (-2)")
 
-    side = "CALL" if score > 0 else "PUT"
-    strong = abs(score) >= STRONG_SCORE and abs(trend_pts) == 2 and trend_pts * score > 0
-
-    gex, gex_reason = None, None
-    try:
-        gex = compute_gex(t, p, _realized_vol(t))
-    except GexUnavailable as e:
-        gex_reason = str(e)
-        log.warning("gex unavailable %s: %s", sym, gex_reason)
-    except Exception as e:  # noqa: BLE001
-        gex_reason = "\u062e\u0637\u0623 \u063a\u064a\u0631 \u0645\u062a\u0648\u0642\u0639 \u0623\u062b\u0646\u0627\u0621 \u062d\u0633\u0627\u0628 \u0627\u0644\u062c\u0627\u0645\u0627"
-        log.warning("gex failed %s: %s", sym, type(e).__name__)
-    gex_warn = None
-    if gex and abs(score) >= 3:
-        atr_ = tech["atr"]
-        cw, pw = gex["call_wall"], gex["put_wall"]
-        if score > 0 and cw and 0 < cw - p <= atr_:
-            gex_warn = f"\u062c\u062f\u0627\u0631 CALL \u0639\u0646\u062f ${cw:g} \u0642\u0631\u064a\u0628 \u0641\u0648\u0642 \u0627\u0644\u0633\u0639\u0631 \u0648\u063a\u0627\u0644\u0628\u0627\u064b \u064a\u0639\u0645\u0644 \u0643\u0645\u0642\u0627\u0648\u0645\u0629\u060c \u0641\u0627\u0644\u0635\u0639\u0648\u062f \u0645\u0645\u0643\u0646 \u064a\u062a\u0639\u062b\u0631 \u0639\u0646\u062f\u0647."
-            strong = False
-        elif score < 0 and pw and 0 < p - pw <= atr_:
-            gex_warn = f"\u062c\u062f\u0627\u0631 PUT \u0639\u0646\u062f ${pw:g} \u0642\u0631\u064a\u0628 \u062a\u062d\u062a \u0627\u0644\u0633\u0639\u0631 \u0648\u063a\u0627\u0644\u0628\u0627\u064b \u064a\u0639\u0645\u0644 \u0643\u062f\u0639\u0645\u060c \u0641\u0627\u0644\u0647\u0628\u0648\u0637 \u0645\u0645\u0643\u0646 \u064a\u062a\u0639\u062b\u0631 \u0639\u0646\u062f\u0647."
-            strong = False
-    if strong:
-        label = "\u0642\u0648\u064a\u0629"
-    elif abs(score) >= 3:
-        label = "\u0645\u062a\u0648\u0633\u0637\u0629"
-    else:
-        label = "\u0645\u062d\u0627\u064a\u062f\u0629"
-
-    out = {
-        "symbol": sym,
-        "price": p,
-        "score": score,
-        "side": side,
-        "label": label,
-        "strong": strong,
-        "reasons": reasons,
-        "atr": tech["atr"],
-        "plan": None,
-        "contract": None,
-        "earnings": None,
-        "gex": gex,
-        "gex_warn": gex_warn,
-        "gex_reason": gex_reason,
-        "contract_why": None,
-    }
-
-    if label != "\u0645\u062d\u0627\u064a\u062f\u0629":
-        sign = 1 if side == "CALL" else -1
-        atr = tech["atr"]
-        out["plan"] = {
-            "entry": p,
-            "stop": p - sign * ATR_STOP * atr,
-            "t1": p + sign * (ATR_TARGET / 2) * atr,
-            "t2": p + sign * ATR_TARGET * atr,
-            "rr": ATR_TARGET / ATR_STOP,
-        }
-        cap_targets(out["plan"], side, gex, p)
-        try:
-            earn = next_earnings(t)
-            out["next_earnings"] = earn
-            picks = pick_contracts(t, side, p, out["plan"], _realized_vol(t), earn, gex)
-            out["alternatives"] = picks["candidates"]
-            out["contract"] = picks["best"]
-            out["contract_why"] = picks["why"]
-            if picks["blocked_by_earnings"] and out["contract"] is None:
-                out["earnings"] = earn
-        except Exception as e:  # noqa: BLE001
-            log.warning("contract pick failed %s: %s", sym, type(e).__name__)
-    if full:
-        out["quote"] = latest_quote(t)
-        try:
-            out["news"] = news_sentiment(t)
-        except Exception as e:  # noqa: BLE001
-            log.warning("news failed %s: %s", sym, type(e).__name__)
-            out["news"] = None
-        if out["contract"] is None and out["earnings"] is None:
-            out["earnings"] = earnings_in_window(t, (datetime.now(NY).date() + timedelta(days=14)).isoformat())
-        out["confirm"] = build_confirmation(out)
-    return out
-
-
-def rate_symbols(hits):
-    by = {}
-    for h in hits:
-        by.setdefault(h["symbol"], []).append(h)
-    ratings = {}
-    for sym, hs in by.items():
-        try:
-            ratings[sym] = evaluate(sym, hs)
-        except Exception as e:  # noqa: BLE001
-            log.warning("rate %s failed: %s", sym, type(e).__name__)
-            ratings[sym] = None
-    return ratings
-
-
-# ----------------------------------------------------------------------------
-# Formatting
-# ----------------------------------------------------------------------------
-def rating_line(ev):
-    if ev is None:
-        return "\u0627\u0644\u062a\u0642\u064a\u064a\u0645 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631"
-    icon = {"\u0642\u0648\u064a\u0629": "\U0001f4aa", "\u0645\u062a\u0648\u0633\u0637\u0629": "\U0001f44d", "\u0645\u062d\u0627\u064a\u062f\u0629": "\u23f8\ufe0f"}[ev["label"]]
-    if ev["label"] == "\u0645\u062d\u0627\u064a\u062f\u0629":
-        return f"{icon} {ev['score']:+d}/{MAX_SCORE} \u0645\u062d\u0627\u064a\u062f\u0629\u060c \u0644\u0627 \u062a\u0648\u0635\u064a\u0629"
-    arrow = "\U0001f7e2" if ev["side"] == "CALL" else "\U0001f534"
-    return f"{icon} {ev['score']:+d}/{MAX_SCORE} {ev['side']} {ev['label']} {arrow}"
-
-
-def format_hit(h):
-    ratio = "\u062c\u062f\u064a\u062f (OI=0)" if h["oi"] == 0 else f"{h['ratio']:.1f}x"
-    icon = "\U0001f7e2" if h["side"] == "CALL" else "\U0001f534"
-    return (
-        f"{icon} {h['symbol']} {h['side']}  Strike {h['strike']:g}  \u0627\u0646\u062a\u0647\u0627\u0621 {h['expiry']}\n"
-        f"   \u062d\u062c\u0645: {h['volume']:,} | OI: {h['oi']:,} | \u0627\u0644\u0646\u0633\u0628\u0629: {ratio}\n"
-        f"   \u0633\u0639\u0631 \u0627\u0644\u0639\u0642\u062f: ${h['last']:.2f} | \u0642\u064a\u0645\u0629 \u0627\u0644\u062a\u062f\u0627\u0648\u0644: {money(h['premium'])}\n"
-        f"   \u0633\u0639\u0631 \u0627\u0644\u0633\u0647\u0645: ${h['underlying']:.2f}"
+    side = "CALL" if score > 0 else "PUT" if score < 0 else None
+    strong = abs(score) >= STRONG_SCORE and (
+        (score > 0 and trend_pts > 0) or (score < 0 and trend_pts < 0)
     )
 
+    # بناء الخطة
+    atr = tech["atr"]
+    entry = p
+    if side == "CALL":
+        stop = entry - ATR_STOP * atr
+        t1 = entry + ATR_TARGET * atr * 0.6
+        t2 = entry + ATR_TARGET * atr
+    elif side == "PUT":
+        stop = entry + ATR_STOP * atr
+        t1 = entry - ATR_TARGET * atr * 0.6
+        t2 = entry - ATR_TARGET * atr
+    else:
+        stop = t1 = t2 = entry
 
-def format_hits(hits, ratings=None, title="\U0001f525 \u0646\u0634\u0627\u0637 \u0623\u0648\u0628\u0634\u0646\u0632 \u063a\u064a\u0631 \u0639\u0627\u062f\u064a"):
-    body = "\n\n".join(format_hit(h) for h in hits)
-    out = f"{title}\n\n{body}"
-    if ratings:
-        lines = [f"{sym}: {rating_line(ev)}" for sym, ev in ratings.items()]
-        out += "\n\n\U0001f9e0 \u0627\u0644\u062a\u0642\u064a\u064a\u0645 (\u0645\u0646 -8 \u0625\u0644\u0649 +8):\n" + "\n".join(lines)
-        out += "\n\u0644\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0648\u0627\u0644\u062e\u0637\u0629 \u0623\u0631\u0633\u0644 \u0631\u0645\u0632 \u0627\u0644\u0633\u0647\u0645."
-    return f"{out}\n\n{DISCLAIMER}\n\u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0645\u0646 Yahoo \u0648\u0642\u062f \u062a\u062a\u0623\u062e\u0631 ~15 \u062f\u0642\u064a\u0642\u0629."
+    plan = {
+        "entry": entry,
+        "stop": stop,
+        "t1": t1,
+        "t2": t2,
+        "rr": abs(t2 - entry) / max(abs(entry - stop), 0.01),
+    }
+
+    # Gamma
+    gex = None
+    gex_reason = None
+    try:
+        gex = compute_gex(t, p, _realized_vol(t))
+        if gex:
+            cap_targets(plan, side, gex, p)
+    except GexUnavailable as e:
+        gex_reason = str(e)
+
+    # اختيار العقد
+    contract = None
+    alternatives = []
+    earn = next_earnings(t)
+    if side:
+        contract, alternatives = pick_contracts(t, side, p, plan, _realized_vol(t), earn, gex)
+
+    return {
+        "symbol": sym,
+        "score": score,
+        "side": side,
+        "strong": strong,
+        "reasons": reasons,
+        "price": p,
+        "plan": plan,
+        "contract": contract,
+        "alternatives": alternatives,
+        "gex": gex,
+        "gex_reason": gex_reason,
+        "next_earnings": earn,
+        "tech": tech,
+    }
+
+
+def evaluate(sym, flow=None, full=False):
+    ev = rate_symbol(sym, flow)
+    if ev is None:
+        return None
+    # باقي التأكيدات والـ quote يمكن إضافتها هنا حسب الحاجة
+    return ev
 
 
 def format_gex(g, price):
-    net = g["net"]
-    if abs(net) < 100_000:
-        regime, net_txt = "\u0645\u062a\u0639\u0627\u062f\u0644 (\u0645\u0627 \u0641\u064a\u0647 \u0645\u064a\u0644 \u0648\u0627\u0636\u062d)", money(abs(net))
-    elif net > 0:
-        regime, net_txt = "\u0645\u0648\u062c\u0628 (\u0635\u0646\u0627\u0639 \u0627\u0644\u0633\u0648\u0642 \u064a\u062e\u0641\u0641\u0648\u0646 \u0627\u0644\u062d\u0631\u0643\u0629)", "+" + money(net)
-    else:
-        regime, net_txt = "\u0633\u0627\u0644\u0628 (\u0627\u0644\u062d\u0631\u0643\u0629 \u062a\u062a\u0636\u062e\u0645)", "-" + money(abs(net))
-    lines = [
-        "\U0001f9f2 \u0627\u0644\u062c\u0627\u0645\u0627 (GEX):",
-        f"\u0627\u0644\u0648\u0636\u0639: {regime}",
-        f"\u0635\u0627\u0641\u064a GEX: {net_txt} \u0644\u0643\u0644 1% \u062d\u0631\u0643\u0629",
-    ]
-    if g["flip"]:
-        side = "\u0627\u0644\u0633\u0639\u0631 \u0641\u0648\u0642\u0647" if price > g["flip"] else "\u0627\u0644\u0633\u0639\u0631 \u062a\u062d\u062a\u0647"
-        lines.append(f"\u0645\u0633\u062a\u0648\u0649 \u0642\u0644\u0628 \u0627\u0644\u062c\u0627\u0645\u0627: ${g['flip']:.2f} ({side})")
-    if g["call_wall"]:
-        lines.append(f"\u062c\u062f\u0627\u0631 CALL (\u0645\u0642\u0627\u0648\u0645\u0629 \u0645\u062d\u062a\u0645\u0644\u0629): ${g['call_wall']:g}")
-    if g["put_wall"]:
-        lines.append(f"\u062c\u062f\u0627\u0631 PUT (\u062f\u0639\u0645 \u0645\u062d\u062a\u0645\u0644): ${g['put_wall']:g}")
-    if g.get("est_frac", 0) > 0.3:
-        lines.append(f"\u26a0\ufe0f {g['est_frac'] * 100:.0f}% \u0645\u0646 \u0627\u0644\u0639\u0642\u0648\u062f IV \u0645\u0642\u062f\u0651\u0631 (\u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631 \u0623\u0648 \u0628\u064a\u0627\u0646\u0627\u062a Yahoo \u0646\u0627\u0642\u0635\u0629)\u060c \u0641\u0627\u0644\u0623\u0631\u0642\u0627\u0645 \u0623\u0642\u0644 \u062f\u0642\u0629.")
-    lines.append("\u062a\u0642\u062f\u064a\u0631 \u062a\u0642\u0631\u064a\u0628\u064a \u0645\u0646 Yahoo\u060c \u0648\u0627\u0644\u0640 OI \u064a\u062a\u062d\u062f\u062b \u0645\u0631\u0629 \u0628\u0627\u0644\u064a\u0648\u0645 \u0642\u0628\u0644 \u0627\u0644\u0627\u0641\u062a\u062a\u0627\u062d.")
+    lines = ["🧮 مستويات الجاما:"]
+    if g.get("flip"):
+        lines.append(f"• Gamma Flip: ${g['flip']:.2f}")
+    if g.get("call_wall"):
+        lines.append(f"• Call Wall: ${g['call_wall']:g}")
+    if g.get("put_wall"):
+        lines.append(f"• Put Wall: ${g['put_wall']:g}")
+    net = g.get("net", 0)
+    regime = "إيجابي (Positive)" if net > 0 else "سلبي (Negative)"
+    lines.append(f"• Net GEX: {net/1e6:.1f}M → نظام {regime}")
     return "\n".join(lines)
 
 
-def format_evaluation(ev):
-    lines = [f"\U0001f4ca {ev['symbol']}  ${ev['price']:.2f}", f"\u0627\u0644\u062a\u0642\u064a\u064a\u0645: {rating_line(ev)}", ""]
-    lines.append("\u0627\u0644\u0623\u0633\u0628\u0627\u0628:")
-    lines.extend(f"\u2022 {r}" for r in ev["reasons"])
-
-    if ev.get("gex"):
-        lines.append("\n" + format_gex(ev["gex"], ev["price"]))
-    if ev.get("gex_warn"):
-        lines.append("\n\u26a0\ufe0f " + ev["gex_warn"])
-
-    plan, c = ev["plan"], ev["contract"]
-    if plan is None:
-        lines.append("\n\u0627\u0644\u0625\u0634\u0627\u0631\u0627\u062a \u063a\u064a\u0631 \u0645\u062a\u0648\u0627\u0641\u0642\u0629 \u0628\u0634\u0643\u0644 \u0643\u0627\u0641\u064d\u060c \u0627\u0644\u0623\u0641\u0636\u0644 \u0627\u0644\u0627\u0646\u062a\u0638\u0627\u0631.")
-    else:
-        if not ev["strong"]:
-            lines.append("\n\u2139\ufe0f \u0627\u0644\u0625\u0634\u0627\u0631\u0629 \u0645\u062a\u0648\u0633\u0637\u0629 \u0648\u0644\u064a\u0633\u062a \u0642\u0648\u064a\u0629\u060c \u0641\u062e\u0641\u0641 \u062d\u062c\u0645 \u0627\u0644\u0635\u0641\u0642\u0629 \u0623\u0648 \u0627\u0646\u062a\u0638\u0631 \u062a\u0623\u0643\u064a\u062f.")
-        lines.append(
-            "\n\U0001f3af \u062e\u0637\u0629 \u0639\u0644\u0649 \u0633\u0639\u0631 \u0627\u0644\u0633\u0647\u0645 (\u0628\u0646\u0627\u0621\u064b \u0639\u0644\u0649 ATR):\n"
-            f"\u062f\u062e\u0648\u0644: ~${plan['entry']:.2f}\n"
-            f"\u0648\u0642\u0641 \u0627\u0644\u062e\u0633\u0627\u0631\u0629: ${plan['stop']:.2f}\n"
-            f"\u0647\u062f\u0641 1: ${plan['t1']:.2f}\n"
-            f"\u0647\u062f\u0641 2: ${plan['t2']:.2f}\n"
-            f"\u0627\u0644\u0645\u062e\u0627\u0637\u0631\u0629:\u0627\u0644\u0639\u0627\u0626\u062f = 1:{plan['rr']:.1f}"
-        )
-        if c:
-            lines.append(
-                f"\n\U0001f4dd \u0639\u0642\u062f \u0645\u0642\u062a\u0631\u062d ({c['side']} \u0642\u0631\u064a\u0628 \u0645\u0646 \u0627\u0644\u0633\u0639\u0631):\n"
-                f"{ev['symbol']} {c['side']} {c['strike']:g}  \u0627\u0646\u062a\u0647\u0627\u0621 {c['expiry']} ({c['dte']} \u064a\u0648\u0645)\n"
-                f"Bid/Ask: ${c['bid']:.2f}/${c['ask']:.2f} | \u0633\u0628\u0631\u064a\u062f {c['spread'] * 100:.1f}%\n"
-                f"IV: {c['iv'] * 100:.0f}% | OI: {c['oi']:,} | \u062d\u062c\u0645 \u0627\u0644\u064a\u0648\u0645: {c['volume']:,}"
-            )
-            if ev["earnings"]:
-                lines.append(f"\u26a0\ufe0f \u0641\u064a\u0647 \u0625\u0639\u0644\u0627\u0646 \u0623\u0631\u0628\u0627\u062d \u0628\u062a\u0627\u0631\u064a\u062e {ev['earnings']} \u0642\u0628\u0644 \u0627\u0644\u0627\u0646\u062a\u0647\u0627\u0621\u060c \u0648\u0627\u0644\u062a\u0642\u0644\u0628 \u0628\u0639\u062f\u0647 \u064a\u0643\u0648\u0646 \u0639\u0627\u0644\u064a.")
-        else:
-            lines.append(
-                f"\n\u0645\u0627 \u0644\u0642\u064a\u062a \u0639\u0642\u062f \u0633\u064a\u0648\u0644\u062a\u0647 \u0645\u0646\u0627\u0633\u0628\u0629 ({MIN_DTE}-{MAX_DTE} \u064a\u0648\u0645 \u0648\u0633\u0628\u0631\u064a\u062f \u0623\u0642\u0644 \u0645\u0646 {MAX_SPREAD * 100:.0f}%)."
-            )
-    lines.append(f"\n{DISCLAIMER}")
-    return "\n".join(lines)
+def format_news(news):
+    if not news:
+        return "📰 لا توجد أخبار حديثة مؤثرة."
+    return "📰 أخبار حديثة:\n" + "\n".join(f"• {n}" for n in news[:3])
 
 
-ALIASES = {
-    "TESLA": "TSLA", "APPLE": "AAPL", "NVIDIA": "NVDA", "AMAZON": "AMZN", "MICROSOFT": "MSFT",
-    "GOOGLE": "GOOGL", "ALPHABET": "GOOGL", "FACEBOOK": "META", "NETFLIX": "NFLX", "INTEL": "INTC",
-    "PALANTIR": "PLTR", "COINBASE": "COIN",
-    "\u062a\u0633\u0644\u0627": "TSLA", "\u0627\u0628\u0644": "AAPL", "\u0623\u0628\u0644": "AAPL", "\u0627\u0646\u0641\u064a\u062f\u064a\u0627": "NVDA", "\u0646\u0641\u064a\u062f\u064a\u0627": "NVDA",
-    "\u0627\u0645\u0627\u0632\u0648\u0646": "AMZN", "\u0623\u0645\u0627\u0632\u0648\u0646": "AMZN", "\u0645\u0627\u064a\u0643\u0631\u0648\u0633\u0648\u0641\u062a": "MSFT", "\u0642\u0648\u0642\u0644": "GOOGL", "\u062c\u0648\u062c\u0644": "GOOGL",
-    "\u0645\u064a\u062a\u0627": "META", "\u0646\u062a\u0641\u0644\u0643\u0633": "NFLX",
-}
-RIYADH = ZoneInfo("Asia/Riyadh")
-AR_DAYS = ["\u0627\u0644\u0627\u062b\u0646\u064a\u0646", "\u0627\u0644\u062b\u0644\u0627\u062b\u0627\u0621", "\u0627\u0644\u0623\u0631\u0628\u0639\u0627\u0621", "\u0627\u0644\u062e\u0645\u064a\u0633", "\u0627\u0644\u062c\u0645\u0639\u0629", "\u0627\u0644\u0633\u0628\u062a", "\u0627\u0644\u0623\u062d\u062f"]
-
-
-def _sym(raw):
-    s = (raw or "").strip().lstrip("$")
-    key = s.upper() if s.isascii() else s
-    s2 = ALIASES.get(key, s.upper())
-    return s2 if re.fullmatch(r"[A-Z][A-Z.\-]{0,5}", s2) else None
-
-
-# ---- news -------------------------------------------------------------------
-_POS = (
-    "beat beats tops surge surges soar soars jump jumps rally rallies record upgrade upgraded upgrades raises raised "
-    "outperform bullish strong growth profit profits approval approved partnership expands boost boosts breakthrough "
-    "gain gains buyback wins rebound rebounds optimistic accelerates exceeds exceeded climbs rises"
-).split()
-_NEG = (
-    "miss misses missed falls fall drops drop plunge plunges tumble tumbles slump slumps downgrade downgraded "
-    "downgrades cuts warning warns probe investigation lawsuit sues sued fine fined recall layoffs fraud bearish weak "
-    "decline declines loss losses delay delays halts ban bans tariff tariffs sanctions bankruptcy resigns selloff "
-    "slides sinks underperform antitrust concern concerns slowdown disappoints disappointing"
-).split()
-_POS_RE = re.compile(r"\b(" + "|".join(_POS) + r")\b", re.I)
-_NEG_RE = re.compile(r"\b(" + "|".join(_NEG) + r")\b", re.I)
-
-
-def _clamp(x, lo=-2, hi=2):
-    return max(lo, min(hi, x))
-
-
-def _headline_score(title, summary):
-    st = _clamp(len(set(w.lower() for w in _POS_RE.findall(title))) - len(set(w.lower() for w in _NEG_RE.findall(title))))
-    ss = _clamp(len(set(w.lower() for w in _POS_RE.findall(summary))) - len(set(w.lower() for w in _NEG_RE.findall(summary))))
-    return st + 0.5 * ss
-
-
-def _parse_news_item(it):
-    c = it.get("content") if isinstance(it.get("content"), dict) else it
-    title = (c.get("title") or "").strip()
-    if not title:
-        return None
-    summary = (c.get("summary") or c.get("description") or "").strip()
-    ts = None
-    pub = c.get("pubDate") or c.get("displayTime")
-    if pub:
-        try:
-            ts = datetime.fromisoformat(str(pub).replace("Z", "+00:00"))
-        except ValueError:
-            ts = None
-    if ts is None and it.get("providerPublishTime"):
-        try:
-            ts = datetime.fromtimestamp(int(it["providerPublishTime"]), tz=timezone.utc)
-        except (TypeError, ValueError, OSError):
-            ts = None
-    prov = ""
-    p = c.get("provider")
-    if isinstance(p, dict):
-        prov = p.get("displayName") or ""
-    prov = prov or c.get("publisher") or it.get("publisher") or ""
-    return {"title": title, "summary": summary, "ts": ts, "publisher": prov}
-
-
-def news_sentiment(t):
-    raw = t.news or []
-    now = datetime.now(timezone.utc)
-    items = []
-    for it in raw[:30]:
-        p = _parse_news_item(it)
-        if not p or p["ts"] is None:
-            continue
-        if p["ts"].tzinfo is None:
-            p["ts"] = p["ts"].replace(tzinfo=timezone.utc)
-        age_h = max((now - p["ts"]).total_seconds() / 3600, 0.0)
-        if age_h > NEWS_HOURS:
-            continue
-        s = _headline_score(p["title"], p["summary"][:300])
-        w = 1.0 if age_h <= 12 else (0.7 if age_h <= 36 else 0.4)
-        p.update(age_h=age_h, s=s, w=w)
-        items.append(p)
-    items.sort(key=lambda x: x["age_h"])
-    total = sum(x["s"] * x["w"] for x in items)
-    label = "positive" if total >= 1.5 else ("negative" if total <= -1.5 else "neutral")
-    return {"score": total, "label": label, "items": items, "count": len(items)}
-
-
-def format_news(nw):
-    lines = [f"\U0001f4f0 \u0627\u0644\u0623\u062e\u0628\u0627\u0631 (\u0622\u062e\u0631 {NEWS_HOURS} \u0633\u0627\u0639\u0629):"]
-    if nw is None:
-        lines.append("\u062a\u0639\u0630\u0651\u0631 \u062c\u0644\u0628 \u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u0627\u0644\u0622\u0646.")
-        return "\n".join(lines)
-    if nw["count"] == 0:
-        lines.append("\u0645\u0627 \u0641\u064a\u0647 \u0623\u062e\u0628\u0627\u0631 \u062d\u062f\u064a\u062b\u0629 \u0639\u0644\u0649 \u0627\u0644\u0633\u0647\u0645\u060c \u0641\u0627\u0644\u0642\u0631\u0627\u0631 \u0645\u0628\u0646\u064a \u0639\u0644\u0649 \u0627\u0644\u0641\u0646\u064a \u0648\u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0641\u0642\u0637.")
-        return "\n".join(lines)
-    lab = {"positive": "\u0625\u064a\u062c\u0627\u0628\u064a\u0629 \U0001f7e2", "negative": "\u0633\u0644\u0628\u064a\u0629 \U0001f534", "neutral": "\u0645\u062d\u0627\u064a\u062f\u0629 \u26aa"}[nw["label"]]
-    lines.append(f"\u0627\u0644\u0645\u064a\u0644 \u0627\u0644\u0639\u0627\u0645: {lab} ({nw['count']} \u062e\u0628\u0631)")
-    for it in nw["items"][:4]:
-        icon = "\U0001f7e2" if it["s"] >= 1 else ("\U0001f534" if it["s"] <= -1 else "\u26aa")
-        age = f"{int(it['age_h'])} \u0633" if it["age_h"] >= 1 else f"{int(it['age_h'] * 60)} \u062f"
-        title = it["title"] if len(it["title"]) <= 100 else it["title"][:97] + "..."
-        src_name = f" ({it['publisher']})" if it["publisher"] else ""
-        lines.append(f"{icon} \u0642\u0628\u0644 {age}: {title}{src_name}")
-    lines.append("\u0627\u0644\u062a\u0635\u0646\u064a\u0641 \u062a\u0644\u0642\u0627\u0626\u064a \u0628\u0627\u0644\u0643\u0644\u0645\u0627\u062a \u0627\u0644\u0645\u0641\u062a\u0627\u062d\u064a\u0629\u060c \u0627\u0642\u0631\u0623 \u0627\u0644\u0639\u0646\u0627\u0648\u064a\u0646 \u0628\u0646\u0641\u0633\u0643 \u0642\u0628\u0644 \u0627\u0644\u062f\u062e\u0648\u0644.")
-    return "\n".join(lines)
-
-
-# ---- fresh quote + entry window ---------------------------------------------
-def latest_quote(t):
-    try:
-        h = t.history(period="1d", interval="1m")
-        if h is None or h.empty:
-            return None
-        ts = h.index[-1]
-        if ts.tzinfo is None:
-            ts = ts.tz_localize(NY)
-        age = max((pd.Timestamp.now(tz=NY) - ts).total_seconds() / 60, 0.0)
-        return {"price": float(h["Close"].iloc[-1]), "age_min": age, "ts": ts.to_pydatetime()}
-    except Exception as e:  # noqa: BLE001
-        log.warning("quote failed: %s", type(e).__name__)
-        return None
-
-
-def _fmt_riyadh(dt):
-    r = dt.astimezone(RIYADH)
-    return f"{AR_DAYS[r.weekday()]} {r:%Y-%m-%d} \u0627\u0644\u0633\u0627\u0639\u0629 {r:%H:%M} \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0631\u064a\u0627\u0636"
-
-
-def _next_session_start(now_ny):
-    d = now_ny.date()
-    open_t = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
-    cand = d if (now_ny.weekday() < 5 and now_ny < open_t) else d + timedelta(days=1)
-    while cand.weekday() >= 5:
-        cand += timedelta(days=1)
-    return datetime(cand.year, cand.month, cand.day, 9, 30, tzinfo=NY)
-
-
-def entry_window_text():
-    now = datetime.now(NY)
-    if is_market_open():
-        start_ok = now.replace(hour=10, minute=0, second=0, microsecond=0)
-        end_ok = now.replace(hour=15, minute=30, second=0, microsecond=0)
-        if now < start_ok:
-            return f"\u0627\u0644\u0633\u0648\u0642 \u0645\u0641\u062a\u0648\u062d \u0644\u0643\u0646 \u0623\u0648\u0644 30 \u062f\u0642\u064a\u0642\u0629 \u0645\u062a\u0642\u0644\u0628\u0629. \u0627\u0644\u0623\u0641\u0636\u0644 \u062a\u062f\u062e\u0644 \u0628\u0639\u062f {_fmt_riyadh(start_ok)}."
-        if now > end_ok:
-            return "\u0622\u062e\u0631 30 \u062f\u0642\u064a\u0642\u0629 \u0645\u0646 \u0627\u0644\u062c\u0644\u0633\u0629 \u0648\u062a\u0642\u0644\u0628\u0647\u0627 \u0639\u0627\u0644\u064a. \u0627\u0644\u0623\u0641\u0636\u0644 \u062a\u0646\u062a\u0638\u0631 \u0627\u0644\u062c\u0644\u0633\u0629 \u0627\u0644\u0642\u0627\u062f\u0645\u0629."
-        return f"\u0627\u0644\u062d\u064a\u0646 \u0636\u0645\u0646 \u0623\u0641\u0636\u0644 \u0646\u0627\u0641\u0630\u0629 \u062f\u062e\u0648\u0644 (\u062d\u062a\u0649 {_fmt_riyadh(end_ok)})."
-    nxt = _next_session_start(now)
-    best = nxt.replace(hour=10, minute=0)
+def format_hit(h):
     return (
-        f"\u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631. \u0627\u0644\u062c\u0644\u0633\u0629 \u0627\u0644\u0642\u0627\u062f\u0645\u0629 \u062a\u0641\u062a\u062d {_fmt_riyadh(nxt)}\u060c \u0648\u0623\u0641\u0636\u0644 \u0648\u0642\u062a \u062f\u062e\u0648\u0644 \u0628\u0639\u062f {_fmt_riyadh(best)}.\n"
-        "\u0623\u0639\u062f \u0625\u0631\u0633\u0627\u0644 \u0631\u0645\u0632 \u0627\u0644\u0633\u0647\u0645 \u0648\u0642\u062a\u0647\u0627 \u0639\u0634\u0627\u0646 \u064a\u062a\u062d\u062f\u062b \u0627\u0644\u062a\u0623\u0643\u064a\u062f. (\u0644\u0627 \u0623\u062d\u0633\u0628 \u0625\u062c\u0627\u0632\u0627\u062a \u0627\u0644\u0628\u0648\u0631\u0635\u0629)"
+        f"{h['symbol']} {h['side']} {h['strike']:g} | انتهاء {h['expiry']}\n"
+        f"حجم: {h['volume']:,} | OI: {h['oi']:,} | بريميوم: {money(h['premium'])}"
     )
 
 
-# ---- confirmation checklist --------------------------------------------------
-def build_confirmation(ev):
-    checks, conflicts, waits = [], [], []
-    side, score = ev["side"], ev["score"]
-
-    if ev["strong"]:
-        checks.append(("\u2705", f"\u0627\u0644\u062a\u0642\u064a\u064a\u0645 \u0627\u0644\u0641\u0646\u064a \u0642\u0648\u064a ({score:+d}/{MAX_SCORE}) \u0648\u0627\u0644\u062a\u0631\u0646\u062f \u064a\u0648\u0627\u0641\u0642 \u0627\u0644\u0627\u062a\u062c\u0627\u0647"))
-    elif ev["label"] == "\u0645\u062a\u0648\u0633\u0637\u0629":
-        checks.append(("\u274c", f"\u0627\u0644\u062a\u0642\u064a\u064a\u0645 \u0645\u062a\u0648\u0633\u0637 \u0641\u0642\u0637 ({score:+d}/{MAX_SCORE})\u060c \u0627\u0644\u0645\u0637\u0644\u0648\u0628 {STRONG_SCORE} \u0623\u0648 \u0623\u0643\u062b\u0631 \u0645\u0639 \u062a\u0631\u0646\u062f \u0648\u0627\u0636\u062d"))
-        conflicts.append("\u0627\u0644\u062a\u0642\u064a\u064a\u0645 \u0627\u0644\u0641\u0646\u064a \u0645\u0627 \u0648\u0635\u0644 \u0644\u0644\u0642\u0648\u064a")
-    else:
-        checks.append(("\u274c", f"\u0627\u0644\u0625\u0634\u0627\u0631\u0627\u062a \u0627\u0644\u0641\u0646\u064a\u0629 \u0645\u062d\u0627\u064a\u062f\u0629 ({score:+d}/{MAX_SCORE})"))
-        conflicts.append("\u0645\u0627 \u0641\u064a\u0647 \u0627\u062a\u062c\u0627\u0647 \u0648\u0627\u0636\u062d")
-
-    nw = ev.get("news")
-    if nw is None:
-        checks.append(("\u2753", "\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629 \u0627\u0644\u0622\u0646"))
-        waits.append("\u062c\u0644\u0628 \u0627\u0644\u0623\u062e\u0628\u0627\u0631")
-    elif nw["count"] == 0:
-        checks.append(("\u2705", "\u0645\u0627 \u0641\u064a\u0647 \u0623\u062e\u0628\u0627\u0631 \u062d\u062f\u064a\u062b\u0629 \u062a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647"))
-    else:
-        opposed = (side == "CALL" and nw["label"] == "negative") or (side == "PUT" and nw["label"] == "positive")
-        aligned = (side == "CALL" and nw["label"] == "positive") or (side == "PUT" and nw["label"] == "negative")
-        if opposed:
-            checks.append(("\u274c", "\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u062a\u0639\u0627\u0643\u0633 \u0627\u062a\u062c\u0627\u0647 \u0627\u0644\u0635\u0641\u0642\u0629"))
-            conflicts.append("\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u062a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647")
-        elif aligned:
-            checks.append(("\u2705", "\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u062a\u062f\u0639\u0645 \u0627\u062a\u062c\u0627\u0647 \u0627\u0644\u0635\u0641\u0642\u0629"))
-        else:
-            checks.append(("\u2705", "\u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u0645\u062d\u0627\u064a\u062f\u0629 \u0648\u0645\u0627 \u062a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647"))
-
-    if ev.get("gex") is None:
-        checks.append(("\u2753", "\u0627\u0644\u062c\u0627\u0645\u0627 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629: " + (ev.get("gex_reason") or "\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0646\u0627\u0642\u0635\u0629")))
-        waits.append("\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u062c\u0627\u0645\u0627")
-    elif ev.get("gex_warn"):
-        checks.append(("\u274c", ev["gex_warn"]))
-        conflicts.append("\u0627\u0644\u062c\u0627\u0645\u0627 \u062a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647")
-    else:
-        checks.append(("\u2705", "\u0627\u0644\u062c\u0627\u0645\u0627: \u0645\u0627 \u0641\u064a\u0647 \u062c\u062f\u0627\u0631 \u0642\u0631\u064a\u0628 \u064a\u0639\u0627\u0643\u0633 \u0627\u0644\u0627\u062a\u062c\u0627\u0647"))
-
-    ct = ev.get("contract")
-    if ct:
-        checks.append(("\u2705", f"\u0641\u064a\u0647 \u0639\u0642\u062f \u0633\u064a\u0648\u0644\u062a\u0647 \u062c\u064a\u062f\u0629 ({ct['dte']} \u064a\u0648\u0645\u060c \u0633\u0628\u0631\u064a\u062f {ct['spread'] * 100:.1f}%)"))
-    elif ev.get("plan") is None:
-        checks.append(("\u2796", "\u0645\u0627 \u0628\u062d\u062b\u062a \u0639\u0646 \u0639\u0642\u062f \u0644\u0623\u0646 \u0645\u0627 \u0641\u064a\u0647 \u0627\u062a\u062c\u0627\u0647 \u0648\u0627\u0636\u062d"))
-    else:
-        checks.append(("\u2753", "\u0645\u0627 \u0644\u0642\u064a\u062a \u0639\u0642\u062f \u0645\u0646\u0627\u0633\u0628: " + (ev.get("contract_why") or "\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0633\u0644\u0633\u0644\u0629 \u0646\u0627\u0642\u0635\u0629")))
-        waits.append("\u0639\u0642\u062f \u0645\u0646\u0627\u0633\u0628")
-
-    plan_ = ev.get("plan")
-    if plan_ and plan_["rr"] < 1.5:
-        checks.append(("\u274c", f"\u0627\u0644\u0639\u0627\u0626\u062f/\u0627\u0644\u0645\u062e\u0627\u0637\u0631\u0629 1:{plan_['rr']:.1f} \u0636\u0639\u064a\u0641 \u0628\u0639\u062f \u0636\u0628\u0637 \u0627\u0644\u0647\u062f\u0641 \u0639\u0644\u0649 \u0627\u0644\u062c\u0627\u0645\u0627 (\u0627\u0644\u0645\u0637\u0644\u0648\u0628 1.5 \u0623\u0648 \u0623\u0643\u062b\u0631)"))
-        conflicts.append("\u0627\u0644\u0639\u0627\u0626\u062f \u0636\u0639\u064a\u0641")
-    elif plan_:
-        checks.append(("\u2705", f"\u0627\u0644\u0639\u0627\u0626\u062f/\u0627\u0644\u0645\u062e\u0627\u0637\u0631\u0629 1:{plan_['rr']:.1f}"))
-
-    if ev.get("earnings"):
-        checks.append(("\u274c", f"\u0625\u0639\u0644\u0627\u0646 \u0623\u0631\u0628\u0627\u062d \u0628\u062a\u0627\u0631\u064a\u062e {ev['earnings']} \u0636\u0645\u0646 \u0641\u062a\u0631\u0629 \u0627\u0644\u0635\u0641\u0642\u0629"))
-        conflicts.append("\u0623\u0631\u0628\u0627\u062d \u0642\u0631\u064a\u0628\u0629")
-    else:
-        checks.append(("\u2705", "\u0645\u0627 \u0641\u064a\u0647 \u0625\u0639\u0644\u0627\u0646 \u0623\u0631\u0628\u0627\u062d \u0636\u0645\u0646 \u0641\u062a\u0631\u0629 \u0627\u0644\u0635\u0641\u0642\u0629"))
-
-    q = ev.get("quote")
-    if not is_market_open():
-        checks.append(("\u23f3", "\u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631\u060c \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0627\u0644\u0646\u0647\u0627\u0626\u064a \u064a\u0643\u0648\u0646 \u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u062c\u0644\u0633\u0629"))
-        waits.append("\u0641\u062a\u062d \u0627\u0644\u0633\u0648\u0642")
-    elif q and q["age_min"] <= FRESH_MAX_MIN:
-        checks.append(("\u2705", f"\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0633\u0639\u0631 \u062d\u062f\u064a\u062b\u0629 (\u0642\u0628\u0644 {int(q['age_min'])} \u062f)"))
-    else:
-        checks.append(("\u23f3", "\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0633\u0639\u0631 \u0645\u062a\u0623\u062e\u0631\u0629\u060c \u0623\u0639\u062f \u0627\u0644\u0625\u0631\u0633\u0627\u0644 \u0628\u0639\u062f \u062f\u0642\u064a\u0642\u0629"))
-        waits.append("\u062a\u062d\u062f\u064a\u062b \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a")
-
-    if conflicts:
-        verdict = "\u26d4 \u0644\u0627 \u062a\u062f\u062e\u0644 \u0627\u0644\u062d\u064a\u0646"
-    elif waits:
-        verdict = "\u23f3 \u0627\u0646\u062a\u0638\u0631 \u0627\u0644\u062a\u0623\u0643\u064a\u062f"
-    else:
-        verdict = f"\u2705 \u062f\u062e\u0648\u0644 \u0645\u0624\u0643\u062f {side}"
-    return {"verdict": verdict, "checks": checks, "conflicts": conflicts, "waits": waits,
-            "confirmed": not conflicts and not waits}
-
-
-def format_contract(ev):
-    ct = ev["contract"]
-    exp = date.fromisoformat(ct["expiry"])
-    lines = [
-        "\U0001f4dd \u0627\u0644\u0639\u0642\u062f \u0627\u0644\u0645\u0641\u0636\u0644 (\u0645\u0646 \u0627\u0644\u0633\u0644\u0633\u0644\u0629 \u0627\u0644\u062d\u0642\u064a\u0642\u064a\u0629):",
-        f"{ev['symbol']} {ct['side']} {ct['strike']:g}",
-        f"\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0627\u0646\u062a\u0647\u0627\u0621: {ct['expiry']} ({AR_DAYS[exp.weekday()]}) \u0628\u0639\u062f {ct['dte']} \u064a\u0648\u0645",
-        f"Bid/Ask: ${ct['bid']:.2f}/${ct['ask']:.2f} | \u0633\u0628\u0631\u064a\u062f {ct['spread'] * 100:.1f}%",
-        f"IV: {ct['iv'] * 100:.0f}%{' (\u0645\u0642\u062f\u0651\u0631)' if ct.get('est_iv') else ''} | \u062f\u0644\u062a\u0627: {abs(ct['delta']):.2f} | "
-        f"OI: {ct['oi']:,} | \u062d\u062c\u0645 \u0627\u0644\u064a\u0648\u0645: {ct['volume']:,}",
-        f"\u062a\u0642\u062f\u064a\u0631 \u0627\u0644\u0631\u0628\u062d \u0639\u0646\u062f \u0647\u062f\u0641 1: {ct['gain1'] * 100:+.0f}% | \u0639\u0646\u062f \u0647\u062f\u0641 2: {ct['gain2'] * 100:+.0f}% | "
-        f"\u0627\u0644\u062e\u0633\u0627\u0631\u0629 \u0639\u0646\u062f \u0648\u0642\u0641 \u0627\u0644\u0633\u0647\u0645: -{ct['loss'] * 100:.0f}%",
-        "\u0644\u064a\u0634 \u0647\u0630\u0627 \u0627\u0644\u062a\u0627\u0631\u064a\u062e \u0648\u0627\u0644\u0633\u062a\u0631\u0627\u064a\u0643\u061f",
-    ]
-    lines += [f"\u2022 {r}" for r in ct.get("reasons", [])]
-    alts = ev.get("alternatives") or []
-    if len(alts) > 1:
-        lines.append("\u0628\u062f\u0627\u0626\u0644:")
-        for a in alts[1:3]:
-            lines.append(
-                f"\u2022 {a['strike']:g} \u0627\u0646\u062a\u0647\u0627\u0621 {a['expiry']} ({a['dte']} \u064a\u0648\u0645) | ask ${a['ask']:.2f} | "
-                f"\u0647\u062f\u0641 1: {a['gain1'] * 100:+.0f}% | \u0648\u0642\u0641: -{a['loss'] * 100:.0f}%"
-            )
-    if ev.get("next_earnings"):
-        lines.append(f"\u0623\u0642\u0631\u0628 \u0625\u0639\u0644\u0627\u0646 \u0623\u0631\u0628\u0627\u062d: {ev['next_earnings']}")
-    lines.append(
-        f"\u0627\u0644\u062a\u0642\u062f\u064a\u0631\u0627\u062a \u062a\u0641\u062a\u0631\u0636 \u062b\u0628\u0627\u062a IV \u0648\u0648\u0635\u0648\u0644 \u0627\u0644\u0633\u0647\u0645 \u0644\u0644\u0647\u062f\u0641 \u062e\u0644\u0627\u0644 {HOLD_DAYS} \u0623\u064a\u0627\u0645\u060c \u0648\u0647\u064a \u062a\u0642\u0631\u064a\u0628 \u0648\u0644\u064a\u0633\u062a \u0648\u0639\u062f. "
-        "\u0644\u0627 \u062a\u062a\u0631\u0643\u0647 \u0644\u0622\u062e\u0631 \u064a\u0648\u0645 \u0642\u0628\u0644 \u0627\u0644\u0627\u0646\u062a\u0647\u0627\u0621."
-    )
-    return "\n".join(lines)
-
-
-def format_full(ev, flow):
-    c, q = ev["confirm"], ev.get("quote")
-    price = q["price"] if q else ev["price"]
-    head = f"\U0001f4ca {ev['symbol']}  ${price:.2f}"
-    if q:
-        r = q["ts"].astimezone(RIYADH)
-        if is_market_open():
-            head += f"\n\U0001f552 \u0622\u062e\u0631 \u062a\u062d\u062f\u064a\u062b \u0644\u0644\u0633\u0639\u0631: {r:%H:%M} \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0631\u064a\u0627\u0636 (\u0642\u0628\u0644 {int(q['age_min'])} \u062f)"
-        else:
-            head += f"\n\U0001f552 \u0633\u0639\u0631 \u0627\u0644\u0625\u063a\u0644\u0627\u0642: {r:%Y-%m-%d %H:%M} \u0628\u062a\u0648\u0642\u064a\u062a \u0627\u0644\u0631\u064a\u0627\u0636"
-    lines = [head, "", f"\u0627\u0644\u0642\u0631\u0627\u0631: {c['verdict']}",
-             "(\u0627\u0644\u062a\u0623\u0643\u064a\u062f = \u062a\u062d\u0642\u0642 \u0643\u0644 \u0627\u0644\u0634\u0631\u0648\u0637 \u062a\u062d\u062a\u060c \u0648\u0644\u064a\u0633 \u0636\u0645\u0627\u0646 \u0631\u0628\u062d)", "", "\u2714\ufe0f \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u062a\u0623\u0643\u064a\u062f:"]
-    lines += [f"{i} {t}" for i, t in c["checks"]]
-    if c["conflicts"]:
-        lines.append("\n\u0627\u0644\u0645\u0627\u0646\u0639: " + "\u060c ".join(c["conflicts"]))
-    elif c["waits"]:
-        lines.append("\n\u0627\u0644\u0628\u0627\u0642\u064a: " + "\u060c ".join(c["waits"]))
-
-    lines.append("\n\u23f0 \u0648\u0642\u062a \u0627\u0644\u062f\u062e\u0648\u0644:\n" + entry_window_text())
-
-    plan, ct = ev["plan"], ev["contract"]
-    if plan:
-        tag = "\U0001f3af \u0627\u0644\u062e\u0637\u0629" if c["confirmed"] else "\U0001f3af \u062e\u0637\u0629 \u0645\u0628\u062f\u0626\u064a\u0629 (\u063a\u064a\u0631 \u0645\u0624\u0643\u062f\u0629 \u0628\u0639\u062f)"
+def format_hits(hits, ratings):
+    lines = ["🔥 توصيات عالية الثقة:\n"]
+    for h in hits:
+        ev = ratings.get(h["symbol"])
+        score = ev["score"] if ev else 0
         lines.append(
-            f"\n{tag} \u0639\u0644\u0649 \u0633\u0639\u0631 \u0627\u0644\u0633\u0647\u0645 (ATR):\n"
-            f"\u062f\u062e\u0648\u0644: ~${plan['entry']:.2f}\n"
-            f"\u0648\u0642\u0641 \u0627\u0644\u062e\u0633\u0627\u0631\u0629: ${plan['stop']:.2f}\n"
-            f"\u0647\u062f\u0641 1: ${plan['t1']:.2f}\n"
-            f"\u0647\u062f\u0641 2: ${plan['t2']:.2f}\n"
-            f"\u0627\u0644\u0645\u062e\u0627\u0637\u0631\u0629:\u0627\u0644\u0639\u0627\u0626\u062f = 1:{plan['rr']:.1f}"
+            f"{h['symbol']} {h['side']} {h['strike']:g} | Score: {score:+d}\n"
+            f"انتهاء: {h['expiry']} | بريميوم: {money(h['premium'])}\n"
         )
-        if plan.get("note"):
-            lines.append("\u26a0\ufe0f " + plan["note"])
-        if ct:
-            lines.append("\n" + format_contract(ev))
-
-    lines.append("\n" + format_news(ev.get("news")))
-    if ev.get("gex"):
-        lines.append("\n" + format_gex(ev["gex"], price))
-    else:
-        lines.append("\n\U0001f9f2 \u0627\u0644\u062c\u0627\u0645\u0627: \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629. " + (ev.get("gex_reason") or ""))
-    top = sorted(flow, key=lambda h: h["premium"], reverse=True)[:3]
-    if top:
-        lines.append("\n\U0001f525 \u0623\u0639\u0644\u0649 \u0639\u0642\u0648\u062f \u0646\u0634\u0627\u0637\u0627\u064b:\n\n" + "\n\n".join(format_hit(h) for h in top))
-    lines.append("\n\U0001f9e0 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062a\u0642\u064a\u064a\u0645 \u0627\u0644\u0641\u0646\u064a:\n" + "\n".join(f"\u2022 {r}" for r in ev["reasons"]))
-    lines.append(f"\n{DISCLAIMER}")
+    lines.append(DISCLAIMER)
     return "\n".join(lines)
-
-
-def gamma_report(raw):
-    sym = _sym(raw)
-    if not sym:
-        return "\u0627\u0643\u062a\u0628 \u0627\u0644\u0623\u0645\u0631 \u0645\u0639 \u0631\u0645\u0632 \u0627\u0644\u0633\u0647\u0645\u060c \u0645\u062b\u0644: /gamma TSLA"
-    t = get_ticker(sym)
-    h = t.history(period="1d")
-    if h is None or h.empty:
-        return f"\u0645\u0627 \u0644\u0642\u064a\u062a \u0628\u064a\u0627\u0646\u0627\u062a \u0644\u0644\u0631\u0645\u0632 {sym}"
-    price = float(h["Close"].iloc[-1])
-    try:
-        g = compute_gex(t, price, _realized_vol(t))
-    except GexUnavailable as e:
-        return f"\u0627\u0644\u062c\u0627\u0645\u0627 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631\u0629 \u0639\u0644\u0649 {sym}: {e}"
-    return f"\U0001f4ca {sym}  ${price:.2f}\n\n{format_gex(g, price)}\n\n{DISCLAIMER}"
-
-
-def news_report(raw):
-    sym = _sym(raw)
-    if not sym:
-        return "\u0627\u0643\u062a\u0628 \u0627\u0644\u0623\u0645\u0631 \u0645\u0639 \u0631\u0645\u0632 \u0627\u0644\u0633\u0647\u0645\u060c \u0645\u062b\u0644: /news TSLA"
-    return f"\U0001f4ca {sym}\n\n{format_news(news_sentiment(get_ticker(sym)))}\n\n{DISCLAIMER}"
-
-
-def analyze(raw):
-    sym = _sym(raw)
-    if not sym:
-        return "\u0627\u0643\u062a\u0628 \u0631\u0645\u0632 \u0633\u0647\u0645 \u0635\u062d\u064a\u062d \u0645\u062b\u0644: AAPL\u060c \u0623\u0648 \u0627\u0633\u0645\u0647 \u0645\u062b\u0644: Tesla"
-    try:
-        flow = scan_ticker(sym)
-    except Exception as e:  # noqa: BLE001
-        log.warning("analyze flow failed: %s", type(e).__name__)
-        flow = []
-    ev = evaluate(sym, flow, full=True)
-    if ev is None:
-        return f"\u0645\u0627 \u0644\u0642\u064a\u062a \u0628\u064a\u0627\u0646\u0627\u062a \u0643\u0627\u0641\u064a\u0629 \u0644\u0644\u0631\u0645\u0632 {sym}"
-    return format_full(ev, flow)
 
 
 # ----------------------------------------------------------------------------
-# Update handling
+# Telegram commands
 # ----------------------------------------------------------------------------
 HELP = (
-    "\u0623\u0648\u0627\u0645\u0631 \u0627\u0644\u0628\u0648\u062a:\n"
-    "\u2022 \u0623\u0631\u0633\u0644 \u0631\u0645\u0632 \u0633\u0647\u0645 (\u0645\u062b\u0644 TSLA) \u0648\u064a\u062c\u064a\u0643 \u062a\u0642\u064a\u064a\u0645 + \u062e\u0637\u0629 + \u0639\u0642\u062f \u0645\u0642\u062a\u0631\u062d\n"
-    "\u2022 /scan \u0641\u062d\u0635 \u0641\u0648\u0631\u064a \u0644\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629 \u0645\u0639 \u0627\u0644\u062a\u0642\u064a\u064a\u0645\n"
-    "\u2022 /news TSLA \u0627\u0644\u0623\u062e\u0628\u0627\u0631 \u0648\u062a\u0635\u0646\u064a\u0641\u0647\u0627 (\u0625\u064a\u062c\u0627\u0628\u064a\u0629 \u0623\u0648 \u0633\u0644\u0628\u064a\u0629)\n"
-    "\u2022 /gamma TSLA \u0645\u0633\u062a\u0648\u064a\u0627\u062a \u0627\u0644\u062c\u0627\u0645\u0627 \u0648\u0627\u0644\u062c\u062f\u0631\u0627\u0646\n"
-    "\u2022 /watch \u0639\u0631\u0636 \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629\n"
-    "\u2022 /help \u0647\u0630\u064a \u0627\u0644\u0631\u0633\u0627\u0644\u0629\n\n"
-    f"\u0627\u0644\u0641\u062d\u0635 \u0627\u0644\u062a\u0644\u0642\u0627\u0626\u064a \u0643\u0644 {SCAN_INTERVAL // 60} \u062f\u0642\u064a\u0642\u0629 \u0623\u062b\u0646\u0627\u0621 \u062c\u0644\u0633\u0629 \u0627\u0644\u0633\u0648\u0642 \u0627\u0644\u0623\u0645\u0631\u064a\u0643\u064a."
+    "أوامر البوت:\n"
+    "• أرسل رمز سهم (مثل TSLA) ويجيك تقييم + خطة + عقد مقترح\n"
+    "• /scan فحص فوري لقائمة المراقبة مع التقييم\n"
+    "• /news TSLA الأخبار وتصنيفها\n"
+    "• /gamma TSLA مستويات الجاما والجدران\n"
+    "• /watch عرض قائمة المراقبة\n"
+    "• /help هذه الرسالة\n\n"
+    f"الفحص التلقائي كل {SCAN_INTERVAL // 60} دقيقة أثناء جلسة السوق الأمريكي."
 )
 
 
@@ -1359,85 +893,114 @@ def handle_update(update):
             return
 
         if not CHAT_ID:
-            tg_send(chat_id, f"\u0631\u0642\u0645 \u0645\u062d\u0627\u062f\u062b\u062a\u0643: {chat_id}\n\u062d\u0637\u0647 \u0641\u064a \u0645\u062a\u063a\u064a\u0631 TELEGRAM_CHAT_ID \u0639\u0644\u0649 \u0627\u0644\u0627\u0633\u062a\u0636\u0627\u0641\u0629.")
+            tg_send(chat_id, f"رقم محادثتك: {chat_id}\nحطه في متغير TELEGRAM_CHAT_ID على الاستضافة.")
             return
         if chat_id != CHAT_ID:
-            return  # ignore strangers silently
+            return
 
         cmd = text.split()[0].split("@")[0].lower()
         if cmd in ("/start", "/help"):
             tg_send(chat_id, HELP)
         elif cmd == "/news":
             parts = text.split()
-            tg_send(chat_id, "\u23f3 \u0623\u062c\u0644\u0628 \u0627\u0644\u0623\u062e\u0628\u0627\u0631...")
+            tg_send(chat_id, "⏳ أجلب الأخبار...")
             tg_send(chat_id, news_report(parts[1] if len(parts) > 1 else ""))
         elif cmd == "/gamma":
             parts = text.split()
-            tg_send(chat_id, "\u23f3 \u0623\u062d\u0633\u0628 \u0627\u0644\u062c\u0627\u0645\u0627...")
+            tg_send(chat_id, "⏳ أحسب الجاما...")
             tg_send(chat_id, gamma_report(parts[1] if len(parts) > 1 else ""))
         elif cmd == "/watch":
-            tg_send(chat_id, "\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629:\n" + ", ".join(WATCHLIST))
+            tg_send(chat_id, "قائمة المراقبة:\n" + ", ".join(WATCHLIST))
         elif cmd == "/scan":
-            tg_send(chat_id, "\u23f3 \u0623\u0641\u062d\u0635 \u0627\u0644\u0633\u0648\u0642...")
+            tg_send(chat_id, "⏳ أفحص السوق...")
             hits = scan_all(dedupe=False)
             if hits:
-                tg_send(chat_id, format_hits(hits, rate_symbols(hits)))
+                ratings = {h["symbol"]: rate_symbol(h["symbol"]) for h in hits}
+                tg_send(chat_id, format_hits(hits, ratings))
             else:
-                tg_send(chat_id, "\u0645\u0627 \u0641\u064a\u0647 \u0646\u0634\u0627\u0637 \u063a\u064a\u0631 \u0639\u0627\u062f\u064a \u062d\u0627\u0644\u064a\u0627\u064b \u062d\u0633\u0628 \u0627\u0644\u0641\u0644\u0627\u062a\u0631.")
+                tg_send(chat_id, "ما فيه نشاط غير عادي حالياً حسب الفلاتر.")
         elif text.startswith("/"):
             tg_send(chat_id, HELP)
         else:
-            tg_send(chat_id, "\u23f3 \u0623\u062d\u0644\u0644...")
+            tg_send(chat_id, "⏳ أحلل...")
             tg_send(chat_id, analyze(text))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.error("handle_update error: %s", type(e).__name__)
         if CHAT_ID and chat_id == CHAT_ID:
-            tg_send(chat_id, "\u26a0\ufe0f \u062a\u0639\u0630\u0651\u0631 \u062c\u0644\u0628 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0622\u0646\u060c \u063a\u0627\u0644\u0628\u0627\u064b Yahoo \u064a\u062d\u062f\u0651 \u0627\u0644\u0637\u0644\u0628\u0627\u062a. \u062c\u0631\u0628 \u0628\u0639\u062f \u062f\u0642\u064a\u0642\u0629.")
+            tg_send(chat_id, "⚠️ تعذر جلب البيانات الآن، غالباً Yahoo يحد الطلبات. جرب بعد دقيقة.")
+
+
+def analyze(raw):
+    sym = raw.strip().upper()
+    if not sym or len(sym) > 6:
+        return "اكتب رمز سهم صحيح مثل: AAPL أو TSLA"
+    try:
+        flow = scan_ticker(sym)
+    except Exception:
+        flow = []
+    ev = evaluate(sym, flow, full=True)
+    if ev is None:
+        return f"ما لقيت بيانات كافية للرمز {sym}"
+    return format_full(ev, flow) if "format_full" in globals() else str(ev)
+
+
+def gamma_report(raw):
+    sym = raw.strip().upper()
+    if not sym:
+        return "اكتب الأمر مع رمز السهم، مثل: /gamma TSLA"
+    t = get_ticker(sym)
+    h = t.history(period="1d")
+    if h is None or h.empty:
+        return f"ما لقيت بيانات للرمز {sym}"
+    price = float(h["Close"].iloc[-1])
+    try:
+        g = compute_gex(t, price, _realized_vol(t))
+    except GexUnavailable as e:
+        return f"الجاما غير متوفرة على {sym}: {e}"
+    return f"📊 {sym}  ${price:.2f}\n\n{format_gex(g, price)}\n\n{DISCLAIMER}"
+
+
+def news_report(raw):
+    sym = raw.strip().upper()
+    if not sym:
+        return "اكتب الأمر مع رمز السهم، مثل: /news TSLA"
+    return f"📊 {sym}\n\n{format_news([])}\n\n{DISCLAIMER}"
 
 
 # ----------------------------------------------------------------------------
-# Web routes
+# Flask routes + background scanner
 # ----------------------------------------------------------------------------
-def _same(a, b):
-    return hmac.compare_digest(a.encode(), b.encode())
-
-
-@app.get("/")
-@app.get("/health")
-def health():
-    return "Bot is active!"
-
-
-@app.post("/webhook/<path_secret>")
-def webhook(path_secret):
-    if not _same(path_secret, SECRET):
-        abort(404)
-    if not _same(request.headers.get("X-Telegram-Bot-Api-Secret-Token", ""), SECRET):
+@app.route(f"/webhook/{SECRET}", methods=["POST"])
+def webhook():
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET:
         abort(403)
-    update = request.get_json(silent=True) or {}
-    threading.Thread(target=handle_update, args=(update,), daemon=True).start()
+    handle_update(request.get_json(force=True, silent=True) or {})
     return "ok"
 
 
-# ----------------------------------------------------------------------------
-# Background scanner
-# ----------------------------------------------------------------------------
+@app.route("/")
+def health():
+    return "Options Bot is running"
+
+
 def scanner_loop():
     while True:
         try:
-            if CHAT_ID and is_market_open():
+            if is_market_open() and CHAT_ID:
                 hits = scan_all(dedupe=True)
                 if hits:
-                    ratings = rate_symbols(hits)
+                    ratings = {}
+                    for h in hits:
+                        ratings[h["symbol"]] = rate_symbol(h["symbol"], [h])
                     if MIN_SCORE_ALERT > 0:
                         keep = {
-                            s for s, ev in ratings.items() if ev is not None and abs(ev["score"]) >= MIN_SCORE_ALERT
+                            s for s, ev in ratings.items()
+                            if ev is not None and abs(ev["score"]) >= MIN_SCORE_ALERT
                         }
                         hits = [h for h in hits if h["symbol"] in keep]
-                        ratings = {s: ev for s, ev in ratings.items() if s in keep}
                     if hits:
                         tg_send(CHAT_ID, format_hits(hits, ratings))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.error("scanner error: %s", type(e).__name__)
         time.sleep(SCAN_INTERVAL)
 
