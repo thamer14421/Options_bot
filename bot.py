@@ -1,4 +1,4 @@
-"""Options Bot - With Short & Long Expiry"""
+"""Options Bot - Stronger Contract Fetch"""
 
 import os
 import logging
@@ -57,30 +57,39 @@ def calc_rsi(closes, period=14):
     except:
         return 50
 
-def find_contract(t, side, price, min_dte, max_dte):
+def find_contracts(t, side, price):
+    results = []
     try:
         opts = t.options
         if not opts:
-            return None
+            return results
         today = date.today()
-        for exp in opts:
-            dte = (date.fromisoformat(exp) - today).days
-            if min_dte <= dte <= max_dte:
-                ch = t.option_chain(exp)
-                df = ch.calls if side == "CALL" else ch.puts
-                df = df[(df["bid"] > 0) & (df["ask"] > 0) & df["lastPrice"].between(10, 90)].copy()
-                if not df.empty:
-                    df["dist"] = abs(df["strike"] - price)
-                    best = df.nsmallest(1, "dist").iloc[0]
-                    return {
-                        "strike": best["strike"],
-                        "expiry": exp,
-                        "price": float(best["lastPrice"]),
-                        "dte": dte
-                    }
-        return None
-    except:
-        return None
+        targets = [(5, 25, "قصير"), (28, 70, "أطول")]
+        for min_d, max_d, label in targets:
+            for exp in opts:
+                dte = (date.fromisoformat(exp) - today).days
+                if min_d <= dte <= max_d:
+                    try:
+                        ch = t.option_chain(exp)
+                        df = ch.calls if side == "CALL" else ch.puts
+                        df = df[(df["bid"] > 0) & (df["ask"] > 0) & df["lastPrice"].between(8, 95)].copy()
+                        if not df.empty:
+                            df["dist"] = abs(df["strike"] - price)
+                            best = df.nsmallest(1, "dist").iloc[0]
+                            results.append({
+                                "label": label,
+                                "strike": best["strike"],
+                                "expiry": exp,
+                                "price": float(best["lastPrice"]),
+                                "dte": dte
+                            })
+                            break
+                    except:
+                        continue
+        return results
+    except Exception as e:
+        log.warning("contracts: %s", e)
+        return results
 
 def analyze(sym):
     sym = sym.upper().strip()
@@ -164,23 +173,13 @@ def analyze(sym):
         ]
 
         if side != "محايد":
-            short = find_contract(t, side, price, 5, 21)
-            long = find_contract(t, side, price, 25, 60)
-
-            if short:
-                lines += [
-                    "",
-                    "عقد قصير الأجل:",
-                    f"{sym} {side} {short['strike']:g} | {short['expiry']} ({short['dte']} يوم)",
-                    f"سعر تقريبي: ${short['price']:.2f}",
-                ]
-            if long:
-                lines += [
-                    "",
-                    "عقد أطول أجل:",
-                    f"{sym} {side} {long['strike']:g} | {long['expiry']} ({long['dte']} يوم)",
-                    f"سعر تقريبي: ${long['price']:.2f}",
-                ]
+            contracts = find_contracts(t, side, price)
+            if contracts:
+                lines.append("\nالعقود المقترحة:")
+                for c in contracts:
+                    lines.append(f"{c['label']}: {sym} {side} {c['strike']:g} | {c['expiry']} ({c['dte']} يوم) ~${c['price']:.2f}")
+            else:
+                lines.append("\nما قدرت أجيب عقود حالياً (Yahoo بطيء). جرب بعد دقيقة.")
 
         lines.append(f"\n{DISCLAIMER}")
         return "\n".join(lines)
@@ -200,7 +199,7 @@ def handle_update(update):
 
         low = text.lower()
         if low in ("/start", "/help"):
-            tg_send(chat_id, "أرسل رمز سهم مثل NVDA\nيعطي حكم + عقد قصير + عقد طويل")
+            tg_send(chat_id, "أرسل رمز سهم مثل MSFT أو NVDA")
             return
 
         tg_send(chat_id, "⏳ أحلل...")
