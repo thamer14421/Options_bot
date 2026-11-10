@@ -1,4 +1,4 @@
-"""Options Bot - Stronger Contract Fetch"""
+"""Options Bot - With News Sentiment"""
 
 import os
 import logging
@@ -23,6 +23,9 @@ API = f"https://api.telegram.org/bot{TOKEN}"
 DISCLAIMER = "⚠️ تحليل فني فقط وليس ضمان. لا تخاطر بأكثر من 1-2% من رأس مالك."
 
 app = Flask(__name__)
+
+NEGATIVE = ["lawsuit", "sec", "investigation", "downgrade", "miss", "cut", "warning", "bankruptcy", "probe", "fine", "fraud", "recall"]
+POSITIVE = ["upgrade", "beat", "record", "growth", "partnership", "buyback", "dividend", "strong", "rally", "surge"]
 
 def tg_send(chat_id, text):
     if not TOKEN or not chat_id:
@@ -57,6 +60,27 @@ def calc_rsi(closes, period=14):
     except:
         return 50
 
+def classify_news(title):
+    t = title.lower()
+    if any(w in t for w in NEGATIVE):
+        return "سلبية"
+    if any(w in t for w in POSITIVE):
+        return "إيجابية"
+    return "محايدة"
+
+def get_news_classified(t):
+    try:
+        news = t.news or []
+        items = []
+        for n in news[:4]:
+            title = (n.get("title") or "")[:110]
+            if title:
+                sentiment = classify_news(title)
+                items.append((sentiment, title))
+        return items
+    except:
+        return []
+
 def find_contracts(t, side, price):
     results = []
     try:
@@ -87,8 +111,7 @@ def find_contracts(t, side, price):
                     except:
                         continue
         return results
-    except Exception as e:
-        log.warning("contracts: %s", e)
+    except:
         return results
 
 def analyze(sym):
@@ -145,10 +168,15 @@ def analyze(sym):
         rr = abs(t2 - price) / max(abs(price - stop), 0.01)
         rr_good = rr >= 1.5
 
-        if side == "CALL" and trend_strong and rsi_good and rr_good and score >= 4:
+        news_items = get_news_classified(t)
+        has_negative = any(s == "سلبية" for s, _ in news_items)
+
+        if side == "CALL" and trend_strong and rsi_good and rr_good and score >= 4 and not has_negative:
             verdict = "✅ دخول قوي ومؤكد"
-        elif side == "PUT" and score <= -4 and rr_good:
+        elif side == "PUT" and score <= -4 and rr_good and not has_negative:
             verdict = "✅ دخول قوي (PUT)"
+        elif has_negative:
+            verdict = "⛔ توقف - فيه أخبار سلبية"
         elif abs(score) >= 3:
             verdict = "⚠️ دخول متوسط"
         else:
@@ -179,7 +207,13 @@ def analyze(sym):
                 for c in contracts:
                     lines.append(f"{c['label']}: {sym} {side} {c['strike']:g} | {c['expiry']} ({c['dte']} يوم) ~${c['price']:.2f}")
             else:
-                lines.append("\nما قدرت أجيب عقود حالياً (Yahoo بطيء). جرب بعد دقيقة.")
+                lines.append("\nما قدرت أجيب عقود حالياً.")
+
+        if news_items:
+            lines.append("\n📰 الأخبار:")
+            for sentiment, title in news_items:
+                icon = "🔴" if sentiment == "سلبية" else "🟢" if sentiment == "إيجابية" else "⚪"
+                lines.append(f"{icon} ({sentiment}) {title}")
 
         lines.append(f"\n{DISCLAIMER}")
         return "\n".join(lines)
