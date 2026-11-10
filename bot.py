@@ -1,12 +1,11 @@
-"""Options Bot - Clean version for Telegram + Render"""
+"""Options Bot - Improved version"""
 
 import os
-import re
 import time
 import math
 import logging
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -16,7 +15,6 @@ from flask import Flask, request, abort
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("options_bot")
 
-# ================== CONFIG ==================
 TOKEN = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 SECRET = os.environ.get("WEBHOOK_SECRET", "mysecret123")
 CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
@@ -28,23 +26,12 @@ WATCHLIST = [
     "V", "MA", "HD", "COST", "CRM", "ORCL", "ADBE", "INTC", "MU", "QCOM"
 ]
 
-SCAN_INTERVAL = 12 * 60
-MIN_SCORE_ALERT = 4
-MIN_DTE = 3
-MAX_DTE = 60
-MIN_PRICE = 10.0
-MAX_PRICE = 90.0
-MAX_SPREAD = 0.15
-MIN_VOLUME = 300
-MIN_OI = 100
-
 NY = ZoneInfo("America/New_York")
 API = f"https://api.telegram.org/bot{TOKEN}"
 DISCLAIMER = "⚠️ معلومات وتحليل فني فقط وليست توصية استثمارية. لا تخاطر بأكثر من 1-2% من رأس مالك."
 
 app = Flask(__name__)
 
-# ================== TELEGRAM ==================
 def tg_send(chat_id, text):
     if not TOKEN or not chat_id:
         return
@@ -61,17 +48,15 @@ def register_webhook():
     if not PUBLIC_URL or not TOKEN:
         return
     try:
-        r = requests.post(f"{API}/setWebhook", json={
+        requests.post(f"{API}/setWebhook", json={
             "url": f"{PUBLIC_URL}/webhook/{SECRET}",
             "secret_token": SECRET,
             "allowed_updates": ["message"],
             "drop_pending_updates": True
         }, timeout=15)
-        log.info("Webhook: %s", r.json())
     except Exception as e:
         log.error("Webhook error: %s", e)
 
-# ================== HELPERS ==================
 def is_market_open():
     now = datetime.now(NY)
     if now.weekday() >= 5:
@@ -79,88 +64,157 @@ def is_market_open():
     minutes = now.hour * 60 + now.minute
     return 9*60+30 <= minutes <= 16*60
 
-def money(x):
-    if x >= 1_000_000:
-        return f"${x/1_000_000:.1f}M"
-    if x >= 1000:
-        return f"${x/1000:.0f}K"
-    return f"${x:.0f}"
+def get_ticker_data(sym):
+    t = yf.Ticker(sym)
+    hist = t.history(period="3mo")
+    if hist.empty or len(hist) < 20:
+        return None
+    price = float(hist["Close"].iloc[-1])
+    atr = float((hist["High"] - hist["Low"]).rolling(14).mean().iloc[-1])
+    ema20 = float(hist["Close"].ewm(span=20).mean().iloc[-1])
+    ema50 = float(hist["Close"].ewm(span=50).mean().iloc[-1])
+    return {"price": price, "atr": atr, "ema20": ema20, "ema50": ema50, "ticker": t}
 
-# ================== ANALYSIS ==================
-def get_price(sym):
+def find_best_contract(t, side, price):
     try:
-        t = yf.Ticker(sym)
-        h = t.history(period="5d")
-        if h.empty:
+        options = t.options
+        if not options:
             return None
-        return float(h["Close"].iloc[-1])
+        # أقرب تاريخ انتهاء بين 7 و 45 يوم
+        today = date.today()
+        best_exp = None
+        for exp in options:
+            dte = (date.fromisoformat(exp) - today).days
+            if 7 <= dte <= 45:
+                best_exp = exp
+                break
+        if not best_exp:
+            best_exp = options[0]
+
+        chain = t.option_chain(best_exp)
+        df = chain.calls if side == "CALL" else chain.puts
+        df = df[(df["bid"] > 0) & (df["ask"] > 0)].copy()
+        if df.empty:
+            return None
+
+        # نختار أقرب سترايك للسعر (ATM أو قريب منه)
+        df["distance"] = abs(df["strike"] - price)
+        df = df[df["lastPrice"].between(10, 90)]
+        if df.empty:
+            return None
+
+        best = df.nsmallest(1, "distance").iloc[0]
+        return {
+            "strike": best["strike"],
+            "expiry": best_exp,
+            "price": float(best["lastPrice"]),
+            "bid": float(best["bid"]),
+            "ask": float(best["ask"]),
+        }
+    except Exception as e:
+        log.warning("contract error: %s", e)
+        return None
+
+def get_gamma_levels(t, price):
+    try:
+        options = t.options
+        if not options:
+            return None
+        exp = options[0]
+        chain = t.option_chain(exp)
+        calls = chain.calls
+        puts = chain.puts
+
+        call_wall = None
+        put_wall = None
+        if not calls.empty:
+            calls = calls[calls["openInterest"] > 0]
+            if not calls.empty:
+                call_wall = float(calls.loc[calls["openInterest"].idxmax()]["strike"])
+        if not puts.empty:
+            puts = puts[puts["openInterest"] > 0]
+            if not puts.empty:
+                put_wall = float(puts.loc[puts["openInterest"].idxmax()]["strike"])
+
+        return {"call_wall": call_wall, "put_wall": put_wall}
     except:
         return None
 
 def analyze_symbol(sym):
     sym = sym.upper().strip()
-    price = get_price(sym)
-    if not price:
-        return f"ما لقيت بيانات لـ {sym}"
+    data = get_ticker_data(sym)
+    if not data:
+        return f"ما لقيت بيانات كافية لـ {sym}"
 
-    try:
-        t = yf.Ticker(sym)
-        # Simple technicals
-        hist = t.history(period="3mo")
-        if hist.empty or len(hist) < 30:
-            return f"بيانات غير كافية لـ {sym}"
+    price = data["price"]
+    atr = data["atr"]
+    ema20 = data["ema20"]
+    ema50 = data["ema50"]
 
-        close = hist["Close"]
-        ema20 = close.ewm(span=20).mean().iloc[-1]
-        ema50 = close.ewm(span=50).mean().iloc[-1]
-        rsi = 50  # placeholder for simplicity
+    score = 0
+    reasons = []
+    if price > ema20 > ema50:
+        score = 3
+        reasons.append("ترند صاعد قوي")
+        side = "CALL"
+    elif price < ema20 < ema50:
+        score = -3
+        reasons.append("ترند هابط قوي")
+        side = "PUT"
+    else:
+        side = "محايد"
+        reasons.append("ترند مختلط")
 
-        score = 0
-        reasons = []
+    # الأهداف
+    if side == "CALL":
+        t1 = price + atr * 1.5
+        t2 = price + atr * 3
+        stop = price - atr * 1.2
+    elif side == "PUT":
+        t1 = price - atr * 1.5
+        t2 = price - atr * 3
+        stop = price + atr * 1.2
+    else:
+        t1 = t2 = stop = price
 
-        if price > ema20 > ema50:
-            score += 3
-            reasons.append("ترند صاعد قوي")
-        elif price < ema20 < ema50:
-            score -= 3
-            reasons.append("ترند هابط قوي")
+    contract = find_best_contract(data["ticker"], side, price) if side != "محايد" else None
+    gex = get_gamma_levels(data["ticker"], price)
 
-        side = "CALL" if score > 0 else "PUT" if score < 0 else "محايد"
+    lines = [
+        f"📊 {sym}  ${price:.2f}",
+        f"التقييم: {score:+d} | الاتجاه: {side}",
+        "",
+        "الأسباب:",
+    ]
+    lines += [f"• {r}" for r in reasons]
 
-        # Options suggestion
-        msg = [
-            f"📊 {sym}  ${price:.2f}",
-            f"التقييم: {score:+d} | الاتجاه: {side}",
-            "",
-            "الأسباب:",
-        ]
-        msg += [f"• {r}" for r in reasons]
+    if side != "محايد":
+        lines.append("")
+        lines.append("🎯 الأهداف (على السهم):")
+        lines.append(f"دخول تقريبي: ${price:.2f}")
+        lines.append(f"هدف 1: ${t1:.2f}")
+        lines.append(f"هدف 2: ${t2:.2f}")
+        lines.append(f"وقف خسارة: ${stop:.2f}")
 
-        # Try to find a contract
-        try:
-            options = t.options
-            if options:
-                exp = options[0]
-                chain = t.option_chain(exp)
-                df = chain.calls if side == "CALL" else chain.puts
-                df = df[(df["bid"] > 0) & (df["ask"] > 0)]
-                df = df[(df["lastPrice"] >= MIN_PRICE) & (df["lastPrice"] <= MAX_PRICE)]
-                if not df.empty:
-                    best = df.iloc[0]
-                    msg.append("")
-                    msg.append(f"عقد مقترح ({side}):")
-                    msg.append(f"{sym} {side} {best['strike']:g} | انتهاء {exp}")
-                    msg.append(f"السعر تقريباً: ${best['lastPrice']:.2f}")
-        except:
-            pass
+    if contract:
+        lines.append("")
+        lines.append(f"عقد مقترح ({side}):")
+        lines.append(f"{sym} {side} {contract['strike']:g} | انتهاء {contract['expiry']}")
+        lines.append(f"السعر تقريباً: ${contract['price']:.2f}")
+        lines.append(f"Bid/Ask: ${contract['bid']:.2f}/${contract['ask']:.2f}")
 
-        msg.append("")
-        msg.append(DISCLAIMER)
-        return "\n".join(msg)
-    except Exception as e:
-        return f"خطأ في تحليل {sym}: {e}"
+    if gex:
+        lines.append("")
+        lines.append("🧮 مستويات الجاما:")
+        if gex.get("call_wall"):
+            lines.append(f"Call Wall: ${gex['call_wall']:g}")
+        if gex.get("put_wall"):
+            lines.append(f"Put Wall: ${gex['put_wall']:g}")
 
-# ================== HANDLER ==================
+    lines.append("")
+    lines.append(DISCLAIMER)
+    return "\n".join(lines)
+
 def handle_update(update):
     try:
         msg = update.get("message") or {}
@@ -168,36 +222,28 @@ def handle_update(update):
         text = (msg.get("text") or "").strip()
         if not chat_id or not text:
             return
-
         if CHAT_ID and chat_id != CHAT_ID:
             return
 
-        if text.startswith("/start") or text.startswith("/help"):
-            tg_send(chat_id, "أرسل رمز سهم مثل TSLA أو NVDA وأحلل لك.\n/scan لفحص سريع")
+        if text.lower() in ("/start", "/help"):
+            tg_send(chat_id, "أرسل رمز سهم مثل TSLA أو NVDA\n/scan لفحص سريع")
             return
 
-        if text.startswith("/scan"):
+        if text.lower().startswith("/scan"):
             tg_send(chat_id, "جاري الفحص...")
             results = []
-            for sym in WATCHLIST[:8]:
-                res = analyze_symbol(sym)
-                if "ترند صاعد" in res or "ترند هابط" in res:
-                    results.append(res.split("\n")[0])
-            if results:
-                tg_send(chat_id, "نتائج سريعة:\n" + "\n".join(results))
-            else:
-                tg_send(chat_id, "ما فيه إشارات قوية حالياً")
+            for s in WATCHLIST[:6]:
+                r = analyze_symbol(s)
+                if "ترند صاعد" in r or "ترند هابط" in r:
+                    results.append(r.split("\n")[0])
+            tg_send(chat_id, "نتائج:\n" + "\n".join(results) if results else "ما فيه إشارات قوية")
             return
 
-        # أي نص آخر = تحليل سهم
         tg_send(chat_id, "⏳ أحلل...")
-        result = analyze_symbol(text)
-        tg_send(chat_id, result)
-
+        tg_send(chat_id, analyze_symbol(text))
     except Exception as e:
         log.error("handle error: %s", e)
 
-# ================== FLASK ==================
 @app.route(f"/webhook/{SECRET}", methods=["POST"])
 def webhook():
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET:
@@ -209,24 +255,11 @@ def webhook():
 def home():
     return "Options Bot Running"
 
-# ================== BACKGROUND ==================
-def scanner_loop():
-    while True:
-        try:
-            if is_market_open() and CHAT_ID:
-                # بسيط: يفحص بعض الأسهم ويرسل لو فيه شيء
-                pass
-        except Exception as e:
-            log.error("scanner: %s", e)
-        time.sleep(SCAN_INTERVAL)
-
 def start():
     threading.Thread(target=register_webhook, daemon=True).start()
-    threading.Thread(target=scanner_loop, daemon=True).start()
     log.info("Bot started")
 
 start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
