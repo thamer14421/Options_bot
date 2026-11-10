@@ -1,4 +1,491 @@
-def rate_symbol(sym, flow=None):
+"""Options Bot: Telegram webhook bot + unusual options flow scanner + multi-factor rating.
+
+All secrets come from environment variables. Nothing sensitive lives in this file.
+
+Required env vars:
+  TELEGRAM_TOKEN    bot token from @BotFather
+  WEBHOOK_SECRET    random string, letters/digits/_/- only (used in the webhook URL and as Telegram secret_token)
+
+Recommended env vars:
+  TELEGRAM_CHAT_ID  your chat id. Only this chat can use the bot and receive alerts.
+  PUBLIC_URL        e.g. https://your-service.onrender.com (webhook is registered automatically at startup)
+
+Optional env vars (flow scanner):
+  WATCHLIST         comma separated tickers (default below)
+  SCAN_INTERVAL_MIN minutes between automatic scans (default 15)
+  MIN_VOLUME        minimum contract volume (default 500)
+  MIN_VOL_OI        minimum volume / open interest ratio (default 2.0)
+  MIN_PREMIUM       minimum premium traded in USD = volume * price * 100 (default 100000)
+  MAX_ALERTS        max contracts per alert message (default 8)
+  EXPIRIES_TO_SCAN  how many nearest expiries to scan per ticker (default 3)
+
+Optional env vars (rating / trade plan):
+  MIN_SCORE_ALERT   automatic alerts only for tickers whose |score| >= this (default 0 = no filter)
+  STRONG_SCORE      |score| needed for a "strong" rating (default 5, max possible is 8)
+  MIN_DTE / MAX_DTE days to expiry range for the suggested contract (default 7 / 45)
+  MAX_SPREAD        max bid/ask spread as a fraction of mid price (default 0.12)
+  ATR_STOP          stop distance in ATRs (default 1.5)
+  ATR_TARGET        final target distance in ATRs (default 3.0)
+  GEX_EXPIRIES      nearest expiries used for gamma exposure (default 4)
+  GEX_MAX_DTE       max days to expiry used for gamma exposure (default 45)
+"""
+
+import hmac
+import logging
+import math
+import os
+import re
+import threading
+import time
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+import requests
+import yfinance as yf
+from flask import Flask, abort, request
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("yfinance").setLevel(logging.WARNING)
+log = logging.getLogger("options_bot")
+
+
+# ----------------------------------------------------------------------------
+# Config
+# ----------------------------------------------------------------------------
+def _env(name, default="", required=False):
+    value = os.environ.get(name, default)
+    if required and not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+TOKEN = _env("TELEGRAM_TOKEN", required=True)
+SECRET = _env("WEBHOOK_SECRET", required=True)
+if not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", SECRET):
+    raise RuntimeError("WEBHOOK_SECRET must be 8-256 chars: letters, digits, _ or - only")
+
+CHAT_ID = str(_env("TELEGRAM_CHAT_ID")).strip()
+PUBLIC_URL = _env("PUBLIC_URL").strip().rstrip("/")
+WATCHLIST = [
+    s.strip().upper()
+    for s in _env(
+        "WATCHLIST",
+        "SPY,QQQ,IWM,DIA,AAPL,MSFT,NVDA,TSLA,AMZN,META,GOOGL,AMD,NFLX,AVGO,COST,JPM,BAC,XOM,CVX,UNH,LLY,JNJ,V,MA,HD,PG,KO,PEP,WMT,DIS,CRM,ORCL,ADBE,INTC,MU,QCOM,TXN,BA,CAT,GE"
+    ).split(",")
+    if s.strip()
+]
+SCAN_INTERVAL = int(_env("SCAN_INTERVAL_MIN", "12")) * 60
+MIN_VOLUME = int(_env("MIN_VOLUME", "300"))
+MIN_VOL_OI = float(_env("MIN_VOL_OI", "1.8"))
+MIN_PREMIUM = float(_env("MIN_PREMIUM", "75000"))
+MAX_ALERTS = int(_env("MAX_ALERTS", "12"))
+EXPIRIES_TO_SCAN = int(_env("EXPIRIES_TO_SCAN", "4"))
+STRIKE_RANGE = 0.18
+
+MIN_SCORE_ALERT = int(_env("MIN_SCORE_ALERT", "4"))
+STRONG_SCORE = int(_env("STRONG_SCORE", "6"))
+MAX_SCORE = 8
+MIN_DTE = int(_env("MIN_DTE", "3"))
+MAX_DTE = int(_env("MAX_DTE", "60"))
+MAX_SPREAD = float(_env("MAX_SPREAD", "0.15"))
+ATR_STOP = float(_env("ATR_STOP", "1.5"))
+ATR_TARGET = float(_env("ATR_TARGET", "3.0"))
+GEX_EXPIRIES = int(_env("GEX_EXPIRIES", "5"))
+GEX_MAX_DTE = int(_env("GEX_MAX_DTE", "60"))
+RISK_FREE = 0.04
+HOLD_DAYS = int(_env("HOLD_DAYS", "5"))
+
+API = f"https://api.telegram.org/bot{TOKEN}"
+NY = ZoneInfo("America/New_York")
+DISCLAIMER = "\u26a0\ufe0f \u0645\u0639\u0644\u0648\u0645\u0627\u062a \u0648\u062a\u062d\u0644\u064a\u0644 \u0641\u0646\u064a \u0641\u0642\u0637 \u0648\u0644\u064a\u0633\u062a \u062a\u0648\u0635\u064a\u0629 \u0627\u0633\u062a\u062b\u0645\u0627\u0631\u064a\u0629. \u0644\u0627 \u062a\u062e\u0627\u0637\u0631 \u0628\u0623\u0643\u062b\u0631 \u0645\u0646 1-2% \u0645\u0646 \u0631\u0623\u0633 \u0645\u0627\u0644\u0643 \u0641\u064a \u0627\u0644\u0635\u0641\u0642\u0629 \u0627\u0644\u0648\u0627\u062d\u062f\u0629."
+
+app = Flask(__name__)
+
+
+# ----------------------------------------------------------------------------
+# Telegram helpers (never log the URL: it contains the token)
+# ----------------------------------------------------------------------------
+def tg_send(chat_id, text):
+    for i in range(0, len(text), 4000):
+        try:
+            r = requests.post(
+                f"{API}/sendMessage",
+                json={"chat_id": chat_id, "text": text[i : i + 4000]},
+                timeout=15,
+            )
+            if not r.ok:
+                log.error("sendMessage failed: HTTP %s", r.status_code)
+        except Exception as e:  # noqa: BLE001
+            log.error("sendMessage error: %s", type(e).__name__)
+
+
+def register_webhook():
+    if not PUBLIC_URL:
+        log.warning("PUBLIC_URL not set: webhook not registered automatically")
+        return
+    try:
+        r = requests.post(
+            f"{API}/setWebhook",
+            json={
+                "url": f"{PUBLIC_URL}/webhook/{SECRET}",
+                "secret_token": SECRET,
+                "allowed_updates": ["message"],
+                "drop_pending_updates": True,
+            },
+            timeout=15,
+        )
+        log.info("setWebhook: HTTP %s ok=%s", r.status_code, r.json().get("ok"))
+    except Exception as e:  # noqa: BLE001
+        log.error("setWebhook error: %s", type(e).__name__)
+
+
+# ----------------------------------------------------------------------------
+# Generic helpers
+# ----------------------------------------------------------------------------
+def is_market_open():
+    now = datetime.now(NY)
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return 9 * 60 + 35 <= minutes <= 16 * 60
+
+
+def money(x):
+    if x >= 1_000_000:
+        return f"${x / 1_000_000:.1f}M"
+    if x >= 1_000:
+        return f"${x / 1_000:.0f}K"
+    return f"${x:.0f}"
+
+
+def _num(x, default=0.0):
+    try:
+        if x is None or (isinstance(x, float) and math.isnan(x)):
+            return default
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
+
+CACHE_TTL = int(_env("CACHE_TTL_SEC", "90"))
+NEWS_HOURS = int(_env("NEWS_HOURS", "72"))
+FRESH_MAX_MIN = int(_env("FRESH_MAX_MIN", "20"))
+
+
+def _with_retry(fn):
+    last = None
+    for i in range(3):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            log.warning("yahoo call failed (try %d): %s", i + 1, type(e).__name__)
+            time.sleep(1.5 * (i + 1))
+    raise last
+
+
+class CachedTicker:
+    """yfinance Ticker wrapper: caches results for CACHE_TTL seconds and retries failed calls."""
+
+    def __init__(self, sym):
+        self._t = yf.Ticker(sym)
+        self._store = {}
+
+    def _get(self, key, fn):
+        hit = self._store.get(key)
+        if hit and time.time() - hit[0] < CACHE_TTL:
+            return hit[1]
+        val = _with_retry(fn)
+        self._store[key] = (time.time(), val)
+        return val
+
+    @property
+    def options(self):
+        return self._get("options", lambda: tuple(self._t.options))
+
+    @property
+    def calendar(self):
+        return self._get("calendar", lambda: self._t.calendar)
+
+    @property
+    def news(self):
+        return self._get("news", lambda: self._t.news)
+
+    def history(self, period="1d", interval="1d"):
+        return self._get(("h", period, interval), lambda: self._t.history(period=period, interval=interval))
+
+    def option_chain(self, exp):
+        return self._get(("c", exp), lambda: self._t.option_chain(exp))
+
+
+_tickers = {}
+_tickers_lock = threading.Lock()
+
+
+def get_ticker(sym):
+    with _tickers_lock:
+        if len(_tickers) > 60:
+            _tickers.clear()
+        ct = _tickers.get(sym)
+        if ct is None:
+            ct = _tickers[sym] = CachedTicker(sym)
+        return ct
+
+
+def calc_rsi(closes, period=14):
+    deltas = closes.diff().dropna()
+    gain = deltas.clip(lower=0).rolling(period).mean().iloc[-1]
+    loss = (-deltas.clip(upper=0)).rolling(period).mean().iloc[-1]
+    if math.isnan(gain) or math.isnan(loss):
+        return None
+    if loss == 0:
+        return 100.0
+    return 100 - 100 / (1 + gain / loss)
+
+
+# ----------------------------------------------------------------------------
+# Unusual options flow scanner
+# ----------------------------------------------------------------------------
+def scan_ticker(sym):
+    """Return unusual option contracts for one ticker (not deduped)."""
+    t = get_ticker(sym)
+    hist = t.history(period="1d")
+    if hist.empty:
+        return []
+    price = float(hist["Close"].iloc[-1])
+    lo, hi = price * (1 - STRIKE_RANGE), price * (1 + STRIKE_RANGE)
+
+    hits = []
+    for exp in list(t.options)[:EXPIRIES_TO_SCAN]:
+        try:
+            chain = t.option_chain(exp)
+        except Exception as e:  # noqa: BLE001
+            log.warning("chain %s %s failed: %s", sym, exp, type(e).__name__)
+            continue
+        for side, df in (("CALL", chain.calls), ("PUT", chain.puts)):
+            for row in df.itertuples():
+                strike = _num(row.strike)
+                vol = _num(row.volume)
+                oi = _num(row.openInterest)
+                last = _num(row.lastPrice)
+                if not (lo <= strike <= hi) or vol < MIN_VOLUME or last <= 0:
+                    continue
+                ratio = vol / oi if oi > 0 else float("inf")
+                premium = vol * last * 100
+                if ratio < MIN_VOL_OI or premium < MIN_PREMIUM:
+                    continue
+                hits.append(
+                    {
+                        "symbol": sym,
+                        "contract": row.contractSymbol,
+                        "side": side,
+                        "strike": strike,
+                        "expiry": exp,
+                        "volume": int(vol),
+                        "oi": int(oi),
+                        "ratio": ratio,
+                        "last": last,
+                        "premium": premium,
+                        "underlying": price,
+                    }
+                )
+    return hits
+
+
+_seen = {}  # contract -> last alerted volume
+_seen_day = None
+_seen_lock = threading.Lock()
+
+
+def _only_new(hits):
+    """Alert each contract once per day, again only if its volume doubled."""
+    global _seen_day
+    today = datetime.now(NY).date()
+    fresh = []
+    with _seen_lock:
+        if _seen_day != today:
+            _seen.clear()
+            _seen_day = today
+        for h in hits:
+            prev = _seen.get(h["contract"], 0)
+            if prev == 0 or h["volume"] >= 2 * prev:
+                _seen[h["contract"]] = h["volume"]
+                fresh.append(h)
+    return fresh
+
+
+def scan_all(dedupe):
+    hits = []
+    for sym in WATCHLIST:
+        try:
+            hits.extend(scan_ticker(sym))
+        except Exception as e:  # noqa: BLE001
+            log.warning("scan %s failed: %s", sym, type(e).__name__)
+        time.sleep(0.5)
+    hits.sort(key=lambda h: h["premium"], reverse=True)
+    if dedupe:
+        hits = _only_new(hits)
+    return hits[:MAX_ALERTS]
+
+
+# ----------------------------------------------------------------------------
+# Multi-factor rating (-8 .. +8)
+#   trend (EMA20/EMA50 stack)    +-2
+#   price vs SMA200              +-1
+#   MACD histogram + direction   +-1
+#   daily RSI zone               +-1
+#   volume spike with direction  +-1
+#   options flow (call vs put $) +-2
+# A "strong" rating also requires the EMA trend to agree with the direction.
+# ----------------------------------------------------------------------------
+def technicals(t):
+    d = t.history(period="1y", interval="1d")
+    if d is None or d.empty or len(d) < 60:
+        return None
+    d = d.dropna(subset=["Close"])
+    c, v = d["Close"], d["Volume"]
+    ema20 = c.ewm(span=20, adjust=False).mean()
+    ema50 = c.ewm(span=50, adjust=False).mean()
+    sma200 = c.rolling(200).mean().iloc[-1]
+    macd_line = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
+    hist = macd_line - macd_line.ewm(span=9, adjust=False).mean()
+    tr = pd.concat(
+        [d["High"] - d["Low"], (d["High"] - c.shift()).abs(), (d["Low"] - c.shift()).abs()],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.rolling(14).mean().iloc[-1]
+    if math.isnan(atr) or atr <= 0:
+        return None
+
+    # volume: use the last COMPLETED day (today's bar is partial while the market is open)
+    i = -2 if is_market_open() else -1
+    base = v.iloc[i - 20 : i].mean()
+    vol_ratio = float(v.iloc[i] / base) if base and base > 0 else None
+    day_up = bool(c.iloc[i] > c.iloc[i - 1])
+
+    return {
+        "price": float(c.iloc[-1]),
+        "ema20": float(ema20.iloc[-1]),
+        "ema50": float(ema50.iloc[-1]),
+        "sma200": None if math.isnan(sma200) else float(sma200),
+        "macd_hist": float(hist.iloc[-1]),
+        "macd_hist_prev": float(hist.iloc[-2]),
+        "rsi": calc_rsi(c),
+        "atr": float(atr),
+        "vol_ratio": vol_ratio,
+        "day_up": day_up,
+    }
+
+
+def _bs_gamma(S, K, T, sigma):
+    if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        return 0.0
+    d1 = (math.log(S / K) + (RISK_FREE + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    pdf = math.exp(-0.5 * d1 * d1) / math.sqrt(2 * math.pi)
+    return pdf / (S * sigma * math.sqrt(T))
+
+
+class GexUnavailable(Exception):
+    """Raised with a user-facing (Arabic) reason when gamma exposure cannot be computed."""
+
+
+def _realized_vol(t):
+    try:
+        d = t.history(period="1y", interval="1d")["Close"].dropna()
+        v = float(d.pct_change().tail(30).std() * math.sqrt(252))
+        return v if 0.05 <= v <= 5.0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def compute_gex(t, price, fallback_iv=None):
+    """Estimate dealer gamma exposure from open interest (dealers assumed long calls / short puts).
+
+    When Yahoo returns a missing/zero IV (typical after the close) the expiry's median IV is used,
+    and if there is none, the stock's realized volatility. The share of estimated contracts is returned.
+    """
+    today = datetime.now(NY).date()
+    opts, used, est, total, fails = [], 0, 0, 0, 0
+    exps = list(t.options)
+    if not exps:
+        raise GexUnavailable("Yahoo \u0645\u0627 \u0631\u062c\u0651\u0639 \u0623\u064a \u062a\u0648\u0627\u0631\u064a\u062e \u0623\u0648\u0628\u0634\u0646\u0632 \u0644\u0647\u0630\u0627 \u0627\u0644\u0633\u0647\u0645 (\u063a\u0627\u0644\u0628\u0627\u064b \u062d\u062f \u0627\u0644\u0637\u0644\u0628\u0627\u062a \u0623\u0648 \u0645\u0634\u0643\u0644\u0629 \u0627\u062a\u0635\u0627\u0644)")
+    for exp in exps:
+        dte = (date.fromisoformat(exp) - today).days
+        if dte < 0:
+            continue
+        if dte > GEX_MAX_DTE or used >= GEX_EXPIRIES:
+            break
+        try:
+            chain = t.option_chain(exp)
+        except Exception:  # noqa: BLE001
+            fails += 1
+            if fails >= 2:
+                break
+            continue
+        used += 1
+        tau = max(dte, 0.5) / 365.0
+        rows = []
+        for sign, df in ((1, chain.calls), (-1, chain.puts)):
+            for row in df.itertuples():
+                k, oi, iv = _num(row.strike), _num(row.openInterest), _num(row.impliedVolatility)
+                if oi <= 0 or not (price * 0.7 <= k <= price * 1.3):
+                    continue
+                rows.append((sign, k, oi, iv))
+        valid = sorted(iv for _, _, _, iv in rows if 0.05 <= iv <= 5.0)
+        med = valid[len(valid) // 2] if valid else None
+        for sign, k, oi, iv in rows:
+            estimated = False
+            if not (0.05 <= iv <= 5.0):
+                iv = med or fallback_iv
+                estimated = True
+            if not iv or not (0.05 <= iv <= 5.0):
+                continue
+            total += 1
+            est += 1 if estimated else 0
+            opts.append((sign, k, oi, iv, tau))
+    if not opts:
+        if used == 0 and fails:
+            raise GexUnavailable("\u0641\u0634\u0644 \u062c\u0644\u0628 \u0633\u0644\u0627\u0633\u0644 \u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0645\u0646 Yahoo (\u063a\u0627\u0644\u0628\u0627\u064b \u062d\u062f \u0627\u0644\u0637\u0644\u0628\u0627\u062a)\u060c \u062c\u0631\u0628 \u0628\u0639\u062f \u062f\u0642\u064a\u0642\u0629")
+        if used == 0:
+            raise GexUnavailable(f"\u0645\u0627 \u0641\u064a\u0647 \u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0646\u062a\u0647\u0627\u0621 \u0636\u0645\u0646 {GEX_MAX_DTE} \u064a\u0648\u0645")
+        raise GexUnavailable("\u0645\u0627 \u0641\u064a\u0647 Open Interest \u0623\u0648 IV \u0643\u0627\u0641\u064a \u0641\u064a \u0627\u0644\u0633\u0644\u0633\u0644\u0629 (\u063a\u0627\u0644\u0628\u0627\u064b \u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631 \u0648\u0628\u064a\u0627\u0646\u0627\u062a Yahoo \u0646\u0627\u0642\u0635\u0629)")
+
+    def net_at(spot):
+        return sum(s * _bs_gamma(spot, k, tau, iv) * oi * 100 * spot * spot * 0.01 for s, k, oi, iv, tau in opts)
+
+    calls, puts = {}, {}
+    for s, k, oi, iv, tau in opts:
+        g = _bs_gamma(price, k, tau, iv) * oi * 100 * price * price * 0.01
+        book = calls if s > 0 else puts
+        book[k] = book.get(k, 0.0) + g
+    above = {k: v for k, v in calls.items() if k >= price}
+    below = {k: v for k, v in puts.items() if k <= price}
+    call_wall = max(above, key=above.get) if above else None
+    put_wall = max(below, key=below.get) if below else None
+
+    crossings, prev_s, prev_v = [], None, None
+    for i in range(61):
+        spot = price * (0.85 + 0.005 * i)
+        v = net_at(spot)
+        if prev_v is not None and prev_v * v < 0:
+            crossings.append(prev_s + (spot - prev_s) * (-prev_v) / (v - prev_v))
+        prev_s, prev_v = spot, v
+    flip = min(crossings, key=lambda c: abs(c - price)) if crossings else None
+
+    return {
+        "net": net_at(price),
+        "flip": flip,
+        "call_wall": call_wall,
+        "put_wall": put_wall,
+        "est_frac": (est / total) if total else 0.0,
+    }
+
+
+def _norm_cdf(x):
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+    def rate_symbol(sym, flow=None):
     t = get_ticker(sym)
     tech = technicals(t)
     if tech is None:
@@ -406,8 +893,6 @@ def cap_targets(plan, side, gex, price):
             plan["note"] = f"هدف 2 مخفّض إلى ${wall:g} لأن جدار PUT (دعم جاما) عنده."
     if risk > 0:
         plan["rr"] = abs(plan["t2"] - price) / risk
-
-
 def _why_text(why):
     if not why:
         return None
