@@ -1,9 +1,10 @@
-"""Options Bot - Stronger Manual Analysis"""
+"""Options Bot - Manual + Strict Auto Alerts"""
 
 import os
+import time
 import logging
 import threading
-from datetime import date, datetime
+from datetime import date
 from zoneinfo import ZoneInfo
 
 import requests
@@ -18,11 +19,19 @@ SECRET = os.environ.get("WEBHOOK_SECRET", "mysecret123")
 CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 
+WATCHLIST = [
+    "SPY","QQQ","IWM","AAPL","MSFT","NVDA","TSLA","AMZN","META",
+    "GOOGL","AMD","NFLX","AVGO","JPM","BAC","XOM","UNH","LLY",
+    "V","MA","HD","COST","CRM","ORCL","ADBE","INTC","MU","QCOM"
+]
+
+SCAN_INTERVAL = 15 * 60
 NY = ZoneInfo("America/New_York")
 API = f"https://api.telegram.org/bot{TOKEN}"
-DISCLAIMER = "⚠️ تحليل فني فقط وليس توصية استثمارية. لا تخاطر بأكثر من 1-2% من رأس مالك في الصفقة."
+DISCLAIMER = "⚠️ تحليل فني فقط وليس ضمان. لا تخاطر بأكثر من 1-2% من رأس مالك."
 
 app = Flask(__name__)
+_sent_today = set()
 
 NEGATIVE_WORDS = ["lawsuit", "sec", "investigation", "downgrade", "miss", "cut", "warning", "bankruptcy", "probe", "fine"]
 
@@ -47,6 +56,13 @@ def register_webhook():
         }, timeout=15)
     except Exception as e:
         log.error("webhook: %s", e)
+
+def is_market_open():
+    now = datetime.now(NY)
+    if now.weekday() >= 5:
+        return False
+    m = now.hour * 60 + now.minute
+    return 9*60+30 <= m <= 16*60
 
 def calc_rsi(closes, period=14):
     delta = closes.diff()
@@ -82,12 +98,7 @@ def get_ticker_data(sym):
 def get_news(t):
     try:
         news = t.news or []
-        items = []
-        for n in news[:5]:
-            title = (n.get("title") or "")[:120]
-            if title:
-                items.append(title)
-        return items
+        return [(n.get("title") or "")[:120] for n in news[:4] if n.get("title")]
     except:
         return []
 
@@ -109,87 +120,82 @@ def get_gamma(t):
     except:
         return None
 
-def analyze(sym):
+def full_analysis(sym):
+    """Returns (message, is_strong_entry, key)"""
     sym = sym.upper().strip()
     d = get_ticker_data(sym)
     if not d:
-        return f"بيانات غير كافية لـ {sym}"
+        return f"بيانات غير كافية لـ {sym}", False, None
 
     price, atr, rsi = d["price"], d["atr"], d["rsi"]
     e20, e50 = d["ema20"], d["ema50"]
     vol_ratio = d["vol_ratio"]
     t = d["ticker"]
 
+    checks = []
     score = 0
-    reasons = []
-    warnings = []
-
-    # الترند
-    if price > e20 > e50:
+    trend_ok = price > e20 > e50
+    if trend_ok:
         score += 3
-        reasons.append("ترند صاعد قوي (السعر فوق EMA20 وEMA50)")
+        checks.append("✅ ترند صاعد قوي")
     elif price < e20 < e50:
         score -= 3
-        reasons.append("ترند هابط قوي")
-        warnings.append("الترند هابط")
+        checks.append("❌ ترند هابط")
+    else:
+        checks.append("⚠️ ترند مختلط")
 
-    # RSI
-    if 50 <= rsi <= 70:
+    rsi_ok = 45 <= rsi <= 68
+    if rsi_ok:
         score += 1
-        reasons.append(f"RSI {rsi:.0f} في منطقة قوة")
-    elif rsi > 75:
+        checks.append(f"✅ RSI {rsi:.0f} مناسب")
+    elif rsi > 72:
         score -= 1
-        warnings.append(f"RSI {rsi:.0f} تشبع شراء")
-    elif rsi < 35:
-        score += 1
-        reasons.append(f"RSI {rsi:.0f} تشبع بيع (احتمال ارتداد)")
+        checks.append(f"⚠️ RSI {rsi:.0f} تشبع شراء")
+    else:
+        checks.append(f"• RSI {rsi:.0f}")
 
-    # الحجم
-    if vol_ratio >= 1.3:
+    vol_ok = vol_ratio >= 1.1
+    if vol_ok:
         score += 1
-        reasons.append(f"حجم أعلى من المتوسط ({vol_ratio:.1f}x)")
-    elif vol_ratio < 0.7:
-        warnings.append("حجم ضعيف")
+        checks.append(f"✅ حجم جيد ({vol_ratio:.1f}x)")
+    else:
+        checks.append(f"⚠️ حجم ضعيف ({vol_ratio:.1f}x)")
 
-    side = "CALL" if score > 1 else "PUT" if score < -1 else "محايد"
+    side = "CALL" if score >= 3 else "PUT" if score <= -3 else "محايد"
 
     if side == "CALL":
-        t1, t2, stop = price + atr * 1.3, price + atr * 2.6, price - atr * 1.0
+        t1, t2, stop = price + atr*1.2, price + atr*2.4, price - atr*1.0
     elif side == "PUT":
-        t1, t2, stop = price - atr * 1.3, price - atr * 2.6, price + atr * 1.0
+        t1, t2, stop = price - atr*1.2, price - atr*2.4, price + atr*1.0
     else:
         t1 = t2 = stop = price
 
     rr = abs(t2 - price) / max(abs(price - stop), 0.01)
+    rr_ok = rr >= 1.6
 
-    # الحكم النهائي
     news = get_news(t)
     bad_news = has_negative_news(news)
 
-    if side == "CALL" and score >= 3 and not bad_news and rr >= 1.5:
-        verdict = "✅ دخول قوي (CALL)"
-    elif side == "PUT" and score <= -3 and not bad_news and rr >= 1.5:
-        verdict = "✅ دخول قوي (PUT)"
+    is_strong = False
+    if side == "CALL" and trend_ok and rsi_ok and vol_ok and rr_ok and not bad_news and score >= 4:
+        verdict = "✅ دخول قوي ومؤكد (CALL)"
+        is_strong = True
+    elif side == "PUT" and score <= -4 and rr_ok and not bad_news:
+        verdict = "✅ دخول قوي ومؤكد (PUT)"
+        is_strong = True
     elif bad_news:
-        verdict = "⛔ توقف - فيه أخبار سلبية"
-    elif abs(score) < 2:
-        verdict = "⏳ انتظر تأكيد أقوى"
+        verdict = "⛔ توقف - أخبار سلبية"
     else:
-        verdict = "⚠️ دخول متوسط (بحذر)"
+        verdict = "⚠️ لا تدخل الآن - الشروط غير مكتملة"
 
     lines = [
         f"📊 {sym}  ${price:.2f}",
         f"الحكم: {verdict}",
         f"التقييم: {score:+d} | الاتجاه: {side}",
-        f"RSI: {rsi:.0f} | حجم: {vol_ratio:.1f}x",
         "",
-        "التأكيدات:",
+        "قائمة التأكيد:",
     ]
-    lines += [f"• {r}" for r in reasons]
-    if warnings:
-        lines.append("\nتحذيرات:")
-        lines += [f"• {w}" for w in warnings]
-
+    lines += checks
     lines += [
         "",
         "🎯 الخطة:",
@@ -204,14 +210,14 @@ def analyze(sym):
         try:
             opts = t.options
             if opts:
-                exp = next((e for e in opts if 5 <= (date.fromisoformat(e) - date.today()).days <= 40), opts[0])
+                exp = next((e for e in opts if 5 <= (date.fromisoformat(e)-date.today()).days <= 35), opts[0])
                 ch = t.option_chain(exp)
-                df = ch.calls if side == "CALL" else ch.puts
-                df = df[(df["bid"] > 0) & (df["ask"] > 0) & df["lastPrice"].between(10, 90)].copy()
+                df = ch.calls if side=="CALL" else ch.puts
+                df = df[(df["bid"]>0)&(df["ask"]>0)&df["lastPrice"].between(10,90)].copy()
                 if not df.empty:
-                    df["dist"] = abs(df["strike"] - price)
-                    best = df.nsmallest(1, "dist").iloc[0]
-                    spr = (best["ask"] - best["bid"]) / best["lastPrice"] if best["lastPrice"] else 0
+                    df["dist"] = abs(df["strike"]-price)
+                    best = df.nsmallest(1,"dist").iloc[0]
+                    spr = (best["ask"]-best["bid"])/best["lastPrice"] if best["lastPrice"] else 0
                     lines += [
                         "",
                         "عقد مقترح:",
@@ -232,10 +238,37 @@ def analyze(sym):
         lines.append("\n📰 أخبار:")
         lines += [f"• {n}" for n in news[:3]]
         if bad_news:
-            lines.append("⚠️ فيه أخبار قد تكون سلبية - راجعها قبل الدخول")
+            lines.append("⛔ فيه أخبار سلبية")
 
     lines.append(f"\n{DISCLAIMER}")
-    return "\n".join(lines)
+    key = f"{sym}_{date.today()}"
+    return "\n".join(lines), is_strong, key
+
+def scanner_loop():
+    global _sent_today
+    while True:
+        try:
+            if is_market_open() and CHAT_ID:
+                today = date.today()
+                if not hasattr(scanner_loop, "day") or scanner_loop.day != today:
+                    _sent_today.clear()
+                    scanner_loop.day = today
+
+                strong = []
+                for sym in WATCHLIST:
+                    msg, is_strong, key = full_analysis(sym)
+                    if is_strong and key and key not in _sent_today:
+                        strong.append((sym, msg))
+                        _sent_today.add(key)
+                    time.sleep(0.6)
+
+                if strong:
+                    header = "🔥 توصيات تلقائية (دخول قوي فقط):\n\n"
+                    body = "\n\n".join(m for _, m in strong[:4])
+                    tg_send(CHAT_ID, header + body)
+        except Exception as e:
+            log.error("scanner: %s", e)
+        time.sleep(SCAN_INTERVAL)
 
 def handle_update(update):
     try:
@@ -249,11 +282,21 @@ def handle_update(update):
 
         low = text.lower()
         if low in ("/start", "/help"):
-            tg_send(chat_id, "أرسل رمز سهم مثل NVDA أو TSLA\nالبوت يعطيك حكم دخول + أهداف + تحذيرات")
+            tg_send(chat_id, "أرسل رمز سهم مثل NVDA\n/scan لفحص يدوي سريع\nالتلقائي يرسل فقط التوصيات القوية")
+            return
+        if low.startswith("/scan"):
+            tg_send(chat_id, "⏳ أفحص الأسهم القوية...")
+            results = []
+            for s in WATCHLIST[:6]:
+                _, is_strong, _ = full_analysis(s)
+                if is_strong:
+                    results.append(s)
+            tg_send(chat_id, "أسهم بشروط قوية حالياً:\n" + ("\n".join(results) if results else "ما فيه شيء قوي حالياً"))
             return
 
         tg_send(chat_id, "⏳ أحلل...")
-        tg_send(chat_id, analyze(text))
+        message, _, _ = full_analysis(text)
+        tg_send(chat_id, message)
     except Exception as e:
         log.error("handle: %s", e)
         if CHAT_ID:
@@ -268,11 +311,12 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "Options Bot Running (Manual Strong)"
+    return "Options Bot Running (Manual + Strict Auto)"
 
 def start():
     threading.Thread(target=register_webhook, daemon=True).start()
-    log.info("Manual strong bot started")
+    threading.Thread(target=scanner_loop, daemon=True).start()
+    log.info("Manual + Strict Auto started")
 
 start()
 
