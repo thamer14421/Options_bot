@@ -1,4 +1,4 @@
-"""Options Bot - Strict & Fast"""
+"""Options Bot - Reliable Fast"""
 
 import os
 import logging
@@ -20,7 +20,7 @@ PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 
 NY = ZoneInfo("America/New_York")
 API = f"https://api.telegram.org/bot{TOKEN}"
-DISCLAIMER = "⚠️ تحليل فني فقط وليس ضمان ربح. لا تخاطر بأكثر من 1-2% من رأس مالك."
+DISCLAIMER = "⚠️ تحليل فني فقط وليس ضمان. لا تخاطر بأكثر من 1-2% من رأس مالك."
 
 app = Flask(__name__)
 
@@ -29,7 +29,7 @@ def tg_send(chat_id, text):
         return
     for i in range(0, len(text), 4000):
         try:
-            requests.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": text[i:i+4000]}, timeout=10)
+            requests.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": text[i:i+4000]}, timeout=8)
         except Exception as e:
             log.error("send: %s", e)
 
@@ -42,7 +42,7 @@ def register_webhook():
             "secret_token": SECRET,
             "allowed_updates": ["message"],
             "drop_pending_updates": True
-        }, timeout=10)
+        }, timeout=8)
     except Exception as e:
         log.error("webhook: %s", e)
 
@@ -61,9 +61,9 @@ def analyze(sym):
     sym = sym.upper().strip()
     try:
         t = yf.Ticker(sym)
-        hist = t.history(period="3mo")
-        if hist.empty or len(hist) < 20:
-            return f"بيانات غير كافية لـ {sym}"
+        hist = t.history(period="3mo", timeout=8)
+        if hist is None or hist.empty or len(hist) < 15:
+            return f"ما قدرت أجيب بيانات لـ {sym} حالياً. جرب بعد دقيقة."
 
         close = hist["Close"]
         price = float(close.iloc[-1])
@@ -74,8 +74,8 @@ def analyze(sym):
 
         checks = []
         score = 0
-
         trend_strong = price > ema20 > ema50
+
         if trend_strong:
             score += 3
             checks.append("✅ ترند صاعد قوي")
@@ -91,7 +91,7 @@ def analyze(sym):
             checks.append(f"✅ RSI {rsi:.0f} مناسب")
         elif rsi > 72:
             score -= 1
-            checks.append(f"⚠️ RSI {rsi:.0f} تشبع شراء")
+            checks.append(f"⚠️ RSI {rsi:.0f} تشبع")
         else:
             checks.append(f"• RSI {rsi:.0f}")
 
@@ -111,13 +111,12 @@ def analyze(sym):
         rr = abs(t2 - price) / max(abs(price - stop), 0.01)
         rr_good = rr >= 1.5
 
-        # الحكم الصارم
         if side == "CALL" and trend_strong and rsi_good and rr_good and score >= 4:
             verdict = "✅ دخول قوي ومؤكد"
         elif side == "PUT" and score <= -4 and rr_good:
             verdict = "✅ دخول قوي (PUT)"
         elif abs(score) >= 3:
-            verdict = "⚠️ دخول متوسط (بحذر)"
+            verdict = "⚠️ دخول متوسط"
         else:
             verdict = "⏳ لا تدخل الآن"
 
@@ -139,30 +138,11 @@ def analyze(sym):
             f"نسبة المخاطرة/العائد: 1:{rr:.1f}",
         ]
 
-        if side != "محايد":
-            try:
-                opts = t.options
-                if opts:
-                    exp = opts[0]
-                    ch = t.option_chain(exp)
-                    df = ch.calls if side == "CALL" else ch.puts
-                    df = df[(df["bid"] > 0) & (df["ask"] > 0) & df["lastPrice"].between(10, 90)].copy()
-                    if not df.empty:
-                        df["dist"] = abs(df["strike"] - price)
-                        best = df.nsmallest(1, "dist").iloc[0]
-                        lines += [
-                            "",
-                            f"عقد: {sym} {side} {best['strike']:g} | {exp}",
-                            f"سعر تقريبي: ${best['lastPrice']:.2f}",
-                        ]
-            except:
-                pass
-
         lines.append(f"\n{DISCLAIMER}")
         return "\n".join(lines)
     except Exception as e:
         log.error("analyze %s: %s", sym, e)
-        return f"خطأ مؤقت في {sym}، جرب بعد ثواني."
+        return f"تعذر تحليل {sym} حالياً (Yahoo بطيء). جرب بعد 30 ثانية."
 
 def handle_update(update):
     try:
@@ -176,13 +156,16 @@ def handle_update(update):
 
         low = text.lower()
         if low in ("/start", "/help"):
-            tg_send(chat_id, "أرسل رمز سهم مثل NVDA\nالبوت يعطي حكم صارم للدخول")
+            tg_send(chat_id, "أرسل رمز سهم مثل NVDA أو AMD")
             return
 
         tg_send(chat_id, "⏳ أحلل...")
-        tg_send(chat_id, analyze(text))
+        result = analyze(text)
+        tg_send(chat_id, result)
     except Exception as e:
         log.error("handle: %s", e)
+        if CHAT_ID:
+            tg_send(CHAT_ID, "خطأ مؤقت. جرب مرة ثانية.")
 
 @app.route(f"/webhook/{SECRET}", methods=["POST"])
 def webhook():
@@ -193,11 +176,11 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "Options Bot Running (Strict Fast)"
+    return "Options Bot Running"
 
 def start():
     threading.Thread(target=register_webhook, daemon=True).start()
-    log.info("Strict fast bot started")
+    log.info("Reliable bot started")
 
 start()
 
