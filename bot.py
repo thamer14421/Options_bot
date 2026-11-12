@@ -30,14 +30,14 @@ Optional env vars (rating / trade plan):
   GEX_MAX_DTE       max days to expiry used for gamma exposure (default 45)
 
 Optional env vars (automatic signals):
-  MIN_PRICE/MAX_PRICE  stock price range to screen (default 10 / 90)
+  CONTRACT_MIN/MAX     total cost of one contract = ask x 100, in USD (default 10 / 90)
+  MIN_PRICE/MAX_PRICE  stock price range to screen (default 3 / 40)
   CONF_MIN             minimum confidence score 0-100 to send an alert (default 75)
   UNIVERSE             comma separated tickers to screen instead of the built-in liquid list
   MAX_DEEP             candidates analysed in depth per cycle (default 8)
   SIGNAL_INTERVAL_MIN  minutes between signal cycles (default 12)
   MIN_DOLLAR_VOL       min 20-day average dollar volume of the stock (default 20000000)
   MAX_DAILY_ALERTS     max automatic signals per day (default 10)
-  OPT_ASK_MIN/MAX      optional option premium range per share (0 = off)
   FLOW_ALERTS          1 = also send the old unusual-flow alerts (default 0)
 """
 
@@ -105,8 +105,10 @@ GEX_MAX_DTE = int(_env("GEX_MAX_DTE", "45"))
 RISK_FREE = 0.04
 HOLD_DAYS = int(_env("HOLD_DAYS", "5"))
 
-MIN_PRICE = float(_env("MIN_PRICE", "10"))
-MAX_PRICE = float(_env("MAX_PRICE", "90"))
+MIN_PRICE = float(_env("MIN_PRICE", "3"))
+MAX_PRICE = float(_env("MAX_PRICE", "40"))
+CONTRACT_MIN = float(_env("CONTRACT_MIN", "10"))
+CONTRACT_MAX = float(_env("CONTRACT_MAX", "90"))
 CONF_MIN = int(_env("CONF_MIN", "75"))
 MAX_DEEP = int(_env("MAX_DEEP", "8"))
 SIGNAL_INTERVAL = int(_env("SIGNAL_INTERVAL_MIN", "12")) * 60
@@ -114,8 +116,6 @@ SCREEN_TTL = int(_env("SCREEN_TTL_SEC", "1800"))
 SCREEN_MIN = int(_env("SCREEN_MIN", "4"))
 MIN_DOLLAR_VOL = float(_env("MIN_DOLLAR_VOL", "20000000"))
 MAX_DAILY_ALERTS = int(_env("MAX_DAILY_ALERTS", "10"))
-OPT_ASK_MIN = float(_env("OPT_ASK_MIN", "0"))
-OPT_ASK_MAX = float(_env("OPT_ASK_MAX", "0"))
 FLOW_ALERTS = _env("FLOW_ALERTS", "0").strip() == "1"
 
 API = f"https://api.telegram.org/bot{TOKEN}"
@@ -735,6 +735,7 @@ def _why_text(why):
     return {
         "noquote": "\u0627\u0644\u0640 Bid/Ask \u0635\u0641\u0631 (\u0627\u0644\u0633\u0648\u0642 \u0645\u0633\u0643\u0631 \u0623\u0648 \u0627\u0644\u0639\u0642\u0648\u062f \u0645\u0627 \u062a\u062a\u062f\u0627\u0648\u0644 \u0627\u0644\u062d\u064a\u0646)",
         "lowoi": "\u0639\u0642\u0648\u062f \u0627\u0644\u0640 OI \u0641\u064a\u0647\u0627 \u0623\u0642\u0644 \u0645\u0646 100",
+        "price_range": f"\u0645\u0627 \u0641\u064a\u0647 \u0639\u0642\u062f \u0633\u0639\u0631\u0647 (ask x 100) \u0628\u064a\u0646 ${CONTRACT_MIN:g} \u0648${CONTRACT_MAX:g} \u0642\u0631\u064a\u0628 \u0645\u0646 \u0627\u0644\u0633\u0639\u0631",
         "spread": f"\u0627\u0644\u0633\u0628\u0631\u064a\u062f \u0623\u0639\u0644\u0649 \u0645\u0646 {MAX_SPREAD * 100:.0f}%",
         "iv": "\u0645\u0627 \u0642\u062f\u0631\u062a \u0623\u062d\u0633\u0628 IV \u0644\u0644\u0639\u0642\u0648\u062f",
         "delta": "\u0645\u0627 \u0641\u064a\u0647 \u062f\u0644\u062a\u0627 \u0645\u0646\u0627\u0633\u0628\u0629 \u0642\u0631\u064a\u0628\u0629 \u0645\u0646 \u0627\u0644\u0633\u0639\u0631",
@@ -787,6 +788,9 @@ def pick_contracts(t, side, price, plan, fallback_iv, earn, gex):
                 continue
             if oi < 100:
                 bump("lowoi")
+                continue
+            if not (CONTRACT_MIN <= ask * 100 <= CONTRACT_MAX):
+                bump("price_range")
                 continue
             mid = (bid + ask) / 2
             spread = (ask - bid) / mid
@@ -1409,6 +1413,7 @@ def format_contract(ev):
         f"{ev['symbol']} {ct['side']} {ct['strike']:g}",
         f"\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0627\u0646\u062a\u0647\u0627\u0621: {ct['expiry']} ({AR_DAYS[exp.weekday()]}) \u0628\u0639\u062f {ct['dte']} \u064a\u0648\u0645",
         f"Bid/Ask: ${ct['bid']:.2f}/${ct['ask']:.2f} | \u0633\u0628\u0631\u064a\u062f {ct['spread'] * 100:.1f}%",
+        f"\U0001f4b0 \u0633\u0639\u0631 \u0627\u0644\u0639\u0642\u062f: ${ct['ask'] * 100:.0f} (ask x 100\u060c \u0628\u062f\u0648\u0646 \u0639\u0645\u0648\u0644\u0629 \u0627\u0644\u0628\u0631\u0648\u0643\u0631)",
         f"IV: {ct['iv'] * 100:.0f}%{' (\u0645\u0642\u062f\u0651\u0631)' if ct.get('est_iv') else ''} | \u062f\u0644\u062a\u0627: {abs(ct['delta']):.2f} | "
         f"OI: {ct['oi']:,} | \u062d\u062c\u0645 \u0627\u0644\u064a\u0648\u0645: {ct['volume']:,}",
         f"\u062a\u0642\u062f\u064a\u0631 \u0627\u0644\u0631\u0628\u062d \u0639\u0646\u062f \u0647\u062f\u0641 1: {ct['gain1'] * 100:+.0f}% | \u0639\u0646\u062f \u0647\u062f\u0641 2: {ct['gain2'] * 100:+.0f}% | "
@@ -1560,7 +1565,7 @@ HELP = (
     "\u2022 /status \u062d\u0627\u0644\u0629 \u0627\u0644\u0641\u062d\u0635 \u0627\u0644\u062a\u0644\u0642\u0627\u0626\u064a \u0648\u0622\u062e\u0631 \u0627\u0644\u0646\u062a\u0627\u0626\u062c\n"
     "\u2022 /watch \u0639\u0631\u0636 \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0645\u0631\u0627\u0642\u0628\u0629\n"
     "\u2022 /help \u0647\u0630\u064a \u0627\u0644\u0631\u0633\u0627\u0644\u0629\n\n"
-    f"\u0627\u0644\u062a\u0648\u0635\u064a\u0627\u062a \u0627\u0644\u062a\u0644\u0642\u0627\u0626\u064a\u0629: \u064a\u0641\u062d\u0635 \u0623\u0633\u0647\u0645 ${MIN_PRICE:g}-${MAX_PRICE:g} \u0645\u0646 \u0627\u0644\u0623\u0643\u0628\u0631 \u0633\u064a\u0648\u0644\u0629 \u0644\u0644\u0623\u0635\u063a\u0631 \u0643\u0644 "
+    f"\u0627\u0644\u062a\u0648\u0635\u064a\u0627\u062a \u0627\u0644\u062a\u0644\u0642\u0627\u0626\u064a\u0629: \u0639\u0642\u0648\u062f \u0633\u0639\u0631\u0647\u0627 ${CONTRACT_MIN:g}-${CONTRACT_MAX:g} (\u0623\u0633\u0647\u0645 ${MIN_PRICE:g}-${MAX_PRICE:g}) \u0645\u0646 \u0627\u0644\u0623\u0643\u0628\u0631 \u0633\u064a\u0648\u0644\u0629 \u0644\u0644\u0623\u0635\u063a\u0631 \u0643\u0644 "
     f"{SIGNAL_INTERVAL // 60} \u062f\u0642\u064a\u0642\u0629 (10:00-15:30 \u0646\u064a\u0648\u064a\u0648\u0631\u0643) \u0648\u064a\u0631\u0633\u0644 \u0641\u0642\u0637 \u0644\u0645\u0627 \u062a\u062a\u062d\u0642\u0642 \u0643\u0644 \u0634\u0631\u0648\u0637 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0648\u062a\u0643\u0648\u0646 \u0627\u0644\u062b\u0642\u0629 {CONF_MIN} \u0623\u0648 \u0623\u0643\u062b\u0631."
 )
 
@@ -1754,6 +1759,7 @@ def format_alert(ev):
         f"{ev['symbol']} {ct['side']} \u0633\u062a\u0631\u0627\u064a\u0643 {ct['strike']:g}",
         f"\u0627\u0646\u062a\u0647\u0627\u0621: {ct['expiry']} ({AR_DAYS[exp.weekday()]}) \u0628\u0639\u062f {ct['dte']} \u064a\u0648\u0645",
         f"Bid/Ask: ${ct['bid']:.2f}/${ct['ask']:.2f} | \u0633\u0628\u0631\u064a\u062f {ct['spread'] * 100:.1f}% | OI {ct['oi']:,}",
+        f"\U0001f4b0 \u0633\u0639\u0631 \u0627\u0644\u0639\u0642\u062f: ${ct['ask'] * 100:.0f} (ask x 100) | \u062a\u062d\u0642\u0642 \u062d\u064a \u0645\u0646 Yahoo \u0639\u0646\u062f \u0627\u0644\u0625\u0631\u0633\u0627\u0644",
         "",
         "\U0001f3af \u0627\u0644\u0623\u0647\u062f\u0627\u0641 (\u0639\u0644\u0649 \u0633\u0639\u0631 \u0627\u0644\u0633\u0647\u0645):",
         f"\u062f\u062e\u0648\u0644 ~${plan['entry']:.2f} | \u0648\u0642\u0641 ${plan['stop']:.2f}",
@@ -1783,6 +1789,7 @@ def format_alert(ev):
     lines.append("")
     lines.append("\u2714\ufe0f " + " | ".join(t for i, t in c["checks"] if i == "\u2705")[:600])
     lines.append("\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062b\u0642\u0629: " + " | ".join(f"{n} {p}/{m}" for n, p, m in cf["parts"]))
+    lines.append("\u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u062d\u0642\u064a\u0642\u064a\u0629 \u0645\u0646 Yahoo (\u0623\u0633\u0639\u0627\u0631 \u0627\u0644\u0623\u0648\u0628\u0634\u0646\u0632 \u0642\u062f \u062a\u062a\u0623\u062e\u0631 ~15 \u062f\u0642\u064a\u0642\u0629). \u0642\u0627\u0631\u0646 Bid/Ask \u0641\u064a \u062a\u0637\u0628\u064a\u0642 \u0648\u0633\u064a\u0637\u0643 \u0642\u0628\u0644 \u0627\u0644\u062f\u062e\u0648\u0644.")
     lines.append("\u0627\u0644\u062a\u0623\u0643\u064a\u062f = \u062a\u062d\u0642\u0642 \u0643\u0644 \u0627\u0644\u0634\u0631\u0648\u0637 \u0648\u0644\u064a\u0633 \u0636\u0645\u0627\u0646 \u0631\u0628\u062d. \u0627\u0644\u062f\u0631\u062c\u0629 \u0644\u064a\u0633\u062a \u0627\u062d\u062a\u0645\u0627\u0644 \u0631\u0628\u062d.")
     lines.append(f"\u0644\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0643\u0627\u0645\u0644\u0629 \u0623\u0631\u0633\u0644: {ev['symbol']}")
     lines.append(DISCLAIMER)
@@ -1800,7 +1807,9 @@ _DEFAULT_UNIVERSE = (
     "ZM OKTA NET DDOG ESTC FSLY SNOW CRWD PANW FTNT ZS S GTLB MDB TEAM HUBS WDAY TTD APP MNDY OPEN CHPT PLUG FCEL "
     "BE ENPH SEDG RUN FSLR NEE AES CCJ UEC LEU OKLO SMR NNE RGTI QBTS IONQ JOBY ACHR ASTS RKLB LUNR SPCE TLRY CGC "
     "SPY QQQ IWM DIA XLF XLE XLP XLU XLI XLV XLK XLY XLB XLC XME XOP XBI KRE KBE SMH SOXL SOXS TQQQ SQQQ UPRO SPXU "
-    "TLT HYG LQD EEM EFA FXI KWEB EWZ EWJ GDX GDXJ SLV GLD USO UNG UVXY VXX ARKK ARKG BITO IBIT ETHA"
+    "TLT HYG LQD EEM EFA FXI KWEB EWZ EWJ GDX GDXJ SLV GLD USO UNG UVXY VXX ARKK ARKG BITO IBIT ETHA "
+    "SIRI NOK ERIC VTRS PTON UWMC CLOV WULF CORZ APLD SOUN BBAI RIG NVAX HL CDE AG PAAS KGC BB NXE ET KEY HBAN RF CFG "
+    "AMCR CNHI GPS BTU CLF X NEM AUY BTG RIOT WBA PCG LUMN PARA VTRS"
 ).split()
 UNIVERSE = [x.strip().upper() for x in _env("UNIVERSE", "").split(",") if x.strip()] or list(dict.fromkeys(_DEFAULT_UNIVERSE))
 
@@ -1929,6 +1938,37 @@ def _block_reason(ev):
     return "\u0627\u0644\u062b\u0642\u0629 \u0623\u0642\u0644 \u0645\u0646 \u0627\u0644\u062d\u062f"
 
 
+def verify_contract(sym, ev):
+    """Re-read the chosen contract live (no cache) right before alerting."""
+    ct = ev["contract"]
+    t = get_ticker(sym)
+    try:
+        t._store.pop(("c", ct["expiry"]), None)
+        chain = t.option_chain(ct["expiry"])
+        df = chain.calls if ct["side"] == "CALL" else chain.puts
+        row = None
+        for r in df.itertuples():
+            if abs(_num(r.strike) - ct["strike"]) < 1e-9:
+                row = r
+                break
+        if row is None:
+            return False, "\u0627\u0644\u0639\u0642\u062f \u0627\u062e\u062a\u0641\u0649 \u0645\u0646 \u0627\u0644\u0633\u0644\u0633\u0644\u0629"
+        bid, ask, oi = _num(row.bid), _num(row.ask), _num(row.openInterest)
+        if bid <= 0 or ask <= 0:
+            return False, "\u0645\u0627 \u0641\u064a\u0647 Bid/Ask \u062d\u0642\u064a\u0642\u064a \u0627\u0644\u0622\u0646"
+        if oi < 100:
+            return False, "OI \u0623\u0642\u0644 \u0645\u0646 100"
+        if not (CONTRACT_MIN <= ask * 100 <= CONTRACT_MAX):
+            return False, f"\u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u062d\u064a ${ask * 100:.0f} \u062e\u0627\u0631\u062c \u0627\u0644\u0646\u0637\u0627\u0642"
+        spread = (ask - bid) / ((ask + bid) / 2)
+        if spread > MAX_SPREAD * 1.5:
+            return False, f"\u0627\u0644\u0633\u0628\u0631\u064a\u062f \u0627\u0644\u062d\u064a {spread * 100:.0f}% \u0639\u0627\u0644\u064a"
+        ct.update(bid=bid, ask=ask, spread=spread, oi=int(oi))
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        return False, f"\u062a\u0639\u0630\u0631 \u0627\u0644\u0642\u0631\u0627\u0621\u0629 \u0627\u0644\u062d\u064a\u0629 ({type(e).__name__})"
+
+
 def run_cycle():
     day = datetime.now(NY).date()
     if STATE["alerts_day"] != day:
@@ -1978,10 +2018,12 @@ def run_cycle():
         ok = cn["confirmed"] and cf["total"] >= CONF_MIN and ct is not None
         if ok and not (MIN_PRICE <= ev["price"] <= MAX_PRICE):
             ok = False
-        if ok and ((OPT_ASK_MIN and ct["ask"] < OPT_ASK_MIN) or (OPT_ASK_MAX and ct["ask"] > OPT_ASK_MAX)):
-            ok = False
-            results.append((sym, f"\u0633\u0639\u0631 \u0627\u0644\u0639\u0642\u062f ${ct['ask']:.2f} \u062e\u0627\u0631\u062c \u0627\u0644\u0646\u0637\u0627\u0642"))
-            continue
+        if ok:
+            good, why_ = verify_contract(sym, ev)
+            if not good:
+                ok = False
+                results.append((sym, "\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0642\u0642 \u0627\u0644\u062d\u064a \u0645\u0646 \u0627\u0644\u0639\u0642\u062f: " + why_))
+                continue
         key = (sym, ev["side"], ct["expiry"] if ct else None, ct["strike"] if ct else None)
         if ok and key in _alerted:
             results.append((sym, "\u0623\u064f\u0631\u0633\u0644\u062a \u0627\u0644\u064a\u0648\u0645"))
@@ -2050,7 +2092,7 @@ def status_report():
     sc = STATE["screen"]
     lines = [
         "\U0001f4e1 \u062d\u0627\u0644\u0629 \u0627\u0644\u062a\u0648\u0635\u064a\u0627\u062a \u0627\u0644\u062a\u0644\u0642\u0627\u0626\u064a\u0629:",
-        f"\u0627\u0644\u0646\u0637\u0627\u0642: \u0623\u0633\u0647\u0645 ${MIN_PRICE:g}-${MAX_PRICE:g} | \u062d\u062f \u0627\u0644\u062b\u0642\u0629 {CONF_MIN} | \u0643\u0644 {SIGNAL_INTERVAL // 60} \u062f\u0642\u064a\u0642\u0629",
+        f"\u0627\u0644\u0646\u0637\u0627\u0642: \u0633\u0639\u0631 \u0627\u0644\u0639\u0642\u062f ${CONTRACT_MIN:g}-${CONTRACT_MAX:g} | \u0623\u0633\u0647\u0645 ${MIN_PRICE:g}-${MAX_PRICE:g} | \u062d\u062f \u0627\u0644\u062b\u0642\u0629 {CONF_MIN} | \u0643\u0644 {SIGNAL_INTERVAL // 60} \u062f\u0642\u064a\u0642\u0629",
         f"\u0646\u0627\u0641\u0630\u0629 \u0627\u0644\u0641\u062d\u0635 (10:00-15:30 \u0646\u064a\u0648\u064a\u0648\u0631\u0643): {'\u0645\u0641\u062a\u0648\u062d\u0629 \u0627\u0644\u0622\u0646 \u2705' if in_entry_window() else '\u0645\u0633\u0643\u0631\u0629 \u0627\u0644\u0622\u0646'}",
         f"\u0622\u062e\u0631 \u062f\u0648\u0631\u0629: {_ago(STATE['last_cycle'])} | \u0622\u062e\u0631 \u0641\u062d\u0635 \u0639\u0627\u0645: {_ago(STATE['last_screen'])}",
         f"\u062a\u0648\u0635\u064a\u0627\u062a \u0627\u0644\u064a\u0648\u0645: {STATE['alerts_today']}/{MAX_DAILY_ALERTS}",
